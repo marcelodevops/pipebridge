@@ -247,7 +247,9 @@ def test_scripted_pipeline_converts_to_valid_disabled_draft(tmp_path):
 # ---- safe staged writes with rollback (issue 4) --------------------------
 
 import os
+import shutil
 import uuid as _uuid
+from pathlib import Path
 
 from pipebridge.cli import _write_all
 from pipebridge.errors import PipebridgeError
@@ -317,7 +319,7 @@ def test_write_all_commit_failure_restores_previous_bytes(tmp_path, monkeypatch)
             return _real(src, dst)
 
         monkeypatch.setattr(os, "replace", flaky)
-        with pytest.raises(PipebridgeError):
+        with pytest.raises(PipebridgeError, match="rolled back completely"):
             _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
         monkeypatch.undo()
 
@@ -374,4 +376,158 @@ def test_write_all_staging_failure_touches_nothing(tmp_path, monkeypatch):
     for name, content in PREVIOUS.items():
         assert (out / name).read_text() == content
     assert not (out / "migration-report.json").exists()
+    _assert_no_temp_files(out)
+
+
+# ---- issue: preserve recovery backups when rollback fails -----------------
+
+def test_write_all_failed_restoration_preserves_recovery_backup(tmp_path, monkeypatch):
+    """When a committed replacement cannot be rolled back, the backup holding
+    the only surviving copy of the original bytes must be preserved and its
+    exact path reported — and rollback must still attempt the remaining
+    targets."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "workflow.yml").write_text("PRECIOUS-WF-V1")
+    (out / "migration-report.md").write_text("PRECIOUS-MD-V1")
+    (out / "unrelated.txt").write_text("keep me")
+    items = [
+        (out / "workflow.yml", "NEW-WF"),
+        (out / "migration-report.md", "NEW-MD"),
+        (out / "migration-report.json", "NEW-JSON"),
+    ]
+
+    real_replace = os.replace
+
+    def flaky(src, dst):
+        src, dst = str(src), str(dst)
+        if src.endswith(".tmp") and dst.endswith("migration-report.json"):
+            raise OSError("simulated commit failure")  # triggers rollback
+        if src.endswith(".bak") and dst.endswith("migration-report.md"):
+            raise OSError("simulated restoration failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(PipebridgeError, match="ROLLBACK INCOMPLETE") as excinfo:
+        _write_all(items, protected=tmp_path / "Jenkinsfile")
+    monkeypatch.undo()
+    message = str(excinfo.value)
+
+    # The error identifies the affected target and the exact recovery path.
+    recovery = sorted(out.glob(".migration-report.md.*.bak"))
+    assert len(recovery) == 1, f"expected exactly one recovery backup, got {recovery}"
+    assert "migration-report.md" in message
+    assert str(recovery[0]) in message
+    assert "rolled back completely" not in message
+
+    # The only surviving copy of the original bytes is intact.
+    assert recovery[0].read_text() == "PRECIOUS-MD-V1"
+
+    # Rollback still attempted the remaining target after the failure:
+    # workflow.yml (later in rollback order) was restored byte-for-byte.
+    assert (out / "workflow.yml").read_text() == "PRECIOUS-WF-V1"
+    # The failed restoration leaves the new content in place — honest state.
+    assert (out / "migration-report.md").read_text() == "NEW-MD"
+
+    # The never-committed new artifact is gone; temps are cleaned; the ONLY
+    # leftover is the recovery backup; unrelated files are untouched.
+    assert not (out / "migration-report.json").exists()
+    assert {p.name for p in out.iterdir()} == {
+        "workflow.yml",
+        "migration-report.md",
+        "unrelated.txt",
+        recovery[0].name,
+    }
+    assert (out / "unrelated.txt").read_text() == "keep me"
+
+
+def test_write_all_uninterrupted_restorations_are_cleaned_up(tmp_path, monkeypatch):
+    """Successful restorations consume their backups: after a complete
+    rollback nothing but the original files and unrelated files remain."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "workflow.yml").write_text("PRECIOUS-WF-V1")
+    (out / "unrelated.txt").write_text("keep me")
+    real_replace = os.replace
+
+    def flaky(src, dst):
+        if str(src).endswith(".tmp") and str(dst).endswith("migration-report.json"):
+            raise OSError("simulated commit failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(PipebridgeError, match="rolled back completely"):
+        _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
+    monkeypatch.undo()
+
+    assert (out / "workflow.yml").read_text() == "PRECIOUS-WF-V1"
+    assert (out / "unrelated.txt").read_text() == "keep me"
+    assert {p.name for p in out.iterdir()} == {"workflow.yml", "unrelated.txt"}
+
+
+# ---- issue: clean partially written staging and backup files --------------
+
+@pytest.mark.parametrize("position", [1, 2, 3])
+def test_write_all_partial_stage_write_is_cleaned(tmp_path, monkeypatch, position):
+    """A staging write that hits disk with partial bytes and then fails must
+    leave no temp file behind; original outputs are untouched."""
+    out = tmp_path / "out"
+    out.mkdir()
+    for name, content in PREVIOUS.items():
+        (out / name).write_text(content)
+    (out / "unrelated.txt").write_text("keep me")
+
+    real_write = Path.write_text
+    calls = {"n": 0}
+
+    def flaky_write(self, data, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == position:
+            with open(self, "w", encoding="utf-8") as fh:
+                fh.write(str(data)[:3])  # partial bytes reach the disk
+            raise OSError("simulated partial staging write")
+        return real_write(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write)
+    with pytest.raises(PipebridgeError, match="failed writing generated files"):
+        _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
+    monkeypatch.undo()
+
+    for name, content in PREVIOUS.items():
+        assert (out / name).read_text() == content
+    assert not (out / "migration-report.json").exists()
+    assert (out / "unrelated.txt").read_text() == "keep me"
+    _assert_no_temp_files(out)
+
+
+@pytest.mark.parametrize("position", [1, 2])
+def test_write_all_partial_backup_copy_is_cleaned(tmp_path, monkeypatch, position):
+    """A backup copy that hits disk with partial bytes and then fails must
+    leave no backup or temp file behind; original outputs are untouched."""
+    out = tmp_path / "out"
+    out.mkdir()
+    for name, content in PREVIOUS.items():
+        (out / name).write_text(content)
+    (out / "unrelated.txt").write_text("keep me")
+
+    real_copy = shutil.copyfile
+    calls = {"n": 0}
+
+    def flaky_copy(src, dst, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == position:
+            with open(dst, "wb") as fh:
+                fh.write(b"PARTIAL")  # partial backup bytes reach the disk
+            raise OSError("simulated partial backup copy")
+        return real_copy(src, dst, *a, **kw)
+
+    monkeypatch.setattr(shutil, "copyfile", flaky_copy)
+    with pytest.raises(PipebridgeError, match="failed writing generated files"):
+        _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
+    monkeypatch.undo()
+
+    for name, content in PREVIOUS.items():
+        assert (out / name).read_text() == content
+    assert not (out / "migration-report.json").exists()
+    assert (out / "unrelated.txt").read_text() == "keep me"
     _assert_no_temp_files(out)
