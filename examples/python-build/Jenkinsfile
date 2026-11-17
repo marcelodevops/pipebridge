@@ -1,0 +1,22 @@
+// python-build: declarative checkout, test, then build. Supported subset only.
+pipeline {
+    agent any
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Test') {
+            steps {
+                sh 'PYTHONPATH=. python3 -m unittest discover -s tests -v'
+            }
+        }
+        stage('Build') {
+            steps {
+                sh 'python3 -m pip install build'
+                sh 'python3 -m build'
+            }
+        }
+    }
+}
