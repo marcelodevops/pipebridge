@@ -146,9 +146,11 @@ def generate_workflow(analysis: AnalysisResult, source_name: str = "Jenkinsfile"
             lines.append(f"      {var.name}: {_yaml_scalar(escape_github_expressions(var.value))}")
 
     steps = _generate_steps(pipeline, blockers)
-    if not steps and pipeline.stages:
+    if not steps:
         # A job requires a steps section; when nothing was translated
-        # (pipeline-level blockers), emit a single loud placeholder.
+        # (pipeline-level blockers, or no declarative pipeline at all),
+        # emit a single loud placeholder so the draft stays structurally
+        # valid and disabled.
         stage_lines = [
             f'      #   - stage "{_safe_comment(stage.name)}" (line {stage.span.line})'
             for stage in pipeline.stages

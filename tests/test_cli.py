@@ -3,6 +3,7 @@
 import json
 
 import pytest
+import yaml
 
 from pipebridge.cli import main
 
@@ -191,3 +192,53 @@ def test_usage_error_exits_one(capsys):
 
 def test_unknown_command_exits_one(capsys):
     assert main(["frobnicate"]) == 1
+
+
+# ---- required structure: malformed (1) vs valid-but-unsupported (2) ------
+
+MALFORMED_CASES = {
+    "missing-stages": "pipeline {\n    agent any\n}\n",
+    "empty-stages": "pipeline {\n    agent any\n    stages {\n    }\n}\n",
+    "stage-without-steps": (
+        "pipeline {\n    agent any\n    stages {\n        stage('A') {\n"
+        "            environment {\n                X = 'y'\n            }\n"
+        "        }\n    }\n}\n"
+    ),
+    "empty-steps": (
+        "pipeline {\n    agent any\n    stages {\n        stage('A') {\n"
+        "            steps {\n            }\n        }\n    }\n}\n"
+    ),
+    "empty-file": "",
+}
+
+
+@pytest.mark.parametrize("label", sorted(MALFORMED_CASES))
+def test_malformed_structure_exits_one_and_writes_nothing(tmp_path, label):
+    jf = tmp_path / "Jenkinsfile"
+    jf.write_text(MALFORMED_CASES[label])
+    out = tmp_path / "migration"
+    assert main(["analyze", str(jf)]) == 1
+    assert main(["convert", str(jf), "--output", str(out)]) == 1
+    assert not out.exists() or not any(out.iterdir())
+
+
+def test_scripted_pipeline_converts_to_valid_disabled_draft(tmp_path):
+    """Scripted pipelines are valid but unsupported: exit 2, and the
+    generated draft must remain a structurally valid, disabled workflow."""
+    jf = tmp_path / "Jenkinsfile"
+    jf.write_text("node {\n    sh 'deploy-to-production'\n}\n")
+    out = tmp_path / "migration"
+    assert main(["analyze", str(jf)]) == 2
+    assert main(["convert", str(jf), "--output", str(out)]) == 2
+
+    workflow = (out / "workflow.yml").read_text()
+    parsed = yaml.safe_load(workflow)
+    job = parsed["jobs"]["migrated-pipeline"]
+    assert job["if"] is False  # disabled
+    assert job["steps"], "draft must contain a steps section"
+    joined = "\n".join(s.get("run", "") for s in job["steps"])
+    assert "exit 1" in joined  # placeholder fails loudly
+    assert "deploy-to-production" not in joined  # never extracted
+
+    report = json.loads((out / "migration-report.json").read_text())
+    assert report["exit_code"] == 2

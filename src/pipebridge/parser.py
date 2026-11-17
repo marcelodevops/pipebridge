@@ -17,6 +17,7 @@ Design rules:
 
 from __future__ import annotations
 
+from .errors import MalformedPipelineError
 from .findings import Finding, REGISTRY, PB_AGENT, PB_CRED, PB_ENVVAL, PB_INPUT, PB_INTERP, PB_LIB, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
 from .groovystrings import Decoded, decode_string
 from .lexer import (
@@ -45,6 +46,11 @@ class _Parser:
         self._pos = 0
         self._findings: list[Finding] = []
         self.pipeline: Pipeline | None = None
+        # Required-structure bookkeeping: which stages parsed a steps
+        # section, and which of those sections were non-empty.
+        self._saw_stages_section = False
+        self._stages_with_steps_section: set[int] = set()
+        self._stages_with_nonempty_steps: set[int] = set()
 
     # ---- token helpers -------------------------------------------------
 
@@ -174,6 +180,13 @@ class _Parser:
     def parse(self) -> ParseResult:
         self._skip_newlines()
 
+        if self._peek().kind == EOF and not self._findings:
+            # An empty (or comments-only) file is malformed input: there is
+            # no pipeline here at all, not even a scripted one to report.
+            raise MalformedPipelineError(
+                "the file is empty; there is no pipeline to migrate", 1, 1
+            )
+
         if self._peek().kind == "ANNOTATION":
             tok = self._peek()
             self._add(
@@ -205,6 +218,7 @@ class _Parser:
             )
 
         if self.pipeline is not None:
+            self._validate_required_structure()
             self._skip_newlines()
             tail = self._peek()
             if tail.kind != EOF:
@@ -219,6 +233,51 @@ class _Parser:
         return ParseResult(pipeline=self.pipeline, findings=self._findings)
 
     # ---- grammar -------------------------------------------------------
+
+    def _validate_required_structure(self) -> None:
+        """Enforce required declarative structure (official Jenkins syntax:
+        'stages' requires at least one stage; every stage requires a
+        'steps' section with at least one step). Violations are malformed
+        input. Skipped for pipeline-level-blocked files, whose stage bodies
+        were never traversed, so structure cannot be judged."""
+        pipeline = self.pipeline
+        if pipeline.blocked:
+            return
+        if not self._saw_stages_section:
+            raise MalformedPipelineError(
+                "the pipeline block has no 'stages' section; declarative "
+                "pipelines require one (with at least one stage)",
+                pipeline.span.line,
+                pipeline.span.col,
+            )
+        if not pipeline.stages:
+            raise MalformedPipelineError(
+                "the 'stages' section contains no stage; declarative "
+                "pipelines require at least one stage",
+                pipeline.span.line,
+                pipeline.span.col,
+            )
+        for stage in pipeline.stages:
+            if stage.blocked:
+                # A blocked stage's remaining body was deliberately not
+                # traversed (the enclosing behavior is not preserved), so
+                # its structure cannot be judged: report the unsupported
+                # construct instead (valid-but-unsupported, exit 2).
+                continue
+            if id(stage) not in self._stages_with_steps_section:
+                raise MalformedPipelineError(
+                    f"stage '{stage.name}' has no 'steps' section; every "
+                    "stage requires one (with at least one step)",
+                    stage.span.line,
+                    stage.span.col,
+                )
+            if id(stage) not in self._stages_with_nonempty_steps:
+                raise MalformedPipelineError(
+                    f"the 'steps' section of stage '{stage.name}' is empty; "
+                    "it must contain one or more steps",
+                    stage.span.line,
+                    stage.span.col,
+                )
 
     def _parse_pipeline(self) -> None:
         start = self._advance()  # 'pipeline'
@@ -291,6 +350,7 @@ class _Parser:
                     self._skip_statement()
                 else:
                     saw_stages = True
+                    self._saw_stages_section = True
                     self._advance()
                     self._parse_stages()
             elif name in ("parameters",):
@@ -848,6 +908,12 @@ class _Parser:
             self._skip_statement()
             return
         self._advance()  # '{'
+        # A steps section exists; record it and whether it is non-empty
+        # (an empty section is a required-structure violation).
+        self._stages_with_steps_section.add(id(stage))
+        self._skip_newlines()
+        if self._peek().kind != RBRACE:
+            self._stages_with_nonempty_steps.add(id(stage))
         while True:
             self._skip_newlines()
             tok = self._peek()
