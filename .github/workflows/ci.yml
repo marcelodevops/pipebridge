@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Minimal permissions: the CI only needs to read the repository.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (python ${{ matrix.python-version }})
+    # '3.10' is the declared minimum (requires-python), '3.13' a current
+    # supported version.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package with dev dependencies
+        run: python -m pip install -e '.[dev]'
+      # The tool-present / tool-failing test paths need the real binary;
+      # the absent / unexecutable paths are monkeypatched and run either way.
+      - name: Install pinned actionlint and verify its download
+        run: |
+          curl -sSLo actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo mv actionlint /usr/local/bin/actionlint
+          actionlint --version
+      - name: Run the full test suite
+        run: python -m pytest tests/ -q
+
+  lint-and-build:
+    name: workflow lint and package smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.13"
+
+      # Pinned actionlint release; the download is verified against the
+      # official checksum (sha256 of actionlint_1.7.12_linux_amd64.tar.gz
+      # from the v1.7.12 checksums file, embedded here so a tampered
+      # checksum file alone cannot slip through).
+      - name: Install pinned actionlint and verify its download
+        run: |
+          curl -sSLo actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          sudo mv actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Lint the repository's workflows
+        run: actionlint -no-color
+
+      - name: Build the package
+        run: |
+          python -m pip install build
+          python -m build
+
+      # The installed CLI is exercised OUTSIDE the source directory, from a
+      # fresh virtualenv, so the test proves the wheel ships a working
+      # program (not that the source tree is importable).
+      - name: Smoke-test the installed CLI outside the source directory
+        run: |
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/pip install dist/*.whl
+          mkdir -p /tmp/smoke-project
+          cd /tmp/smoke-project
+          printf 'pipeline {\n    agent any\n    stages {\n        stage('"'"'Build'"'"') {\n            steps {\n                sh '"'"'make build'"'"'\n            }\n        }\n    }\n}\n' > Jenkinsfile
+          /tmp/smoke-venv/bin/pipebridge --version
+          /tmp/smoke-venv/bin/pipebridge analyze Jenkinsfile
+          /tmp/smoke-venv/bin/pipebridge convert Jenkinsfile --output migration
+          test -f migration/workflow.yml
+          grep -q "actions/checkout@" migration/workflow.yml

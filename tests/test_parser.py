@@ -3,7 +3,7 @@
 import pytest
 
 from pipebridge import findings as F
-from pipebridge.errors import LexError
+from pipebridge.errors import LexError, MalformedPipelineError
 from pipebridge.parser import parse
 
 
@@ -424,8 +424,44 @@ def test_malformed_input_raises_lex_error():
         parse("sh 'unterminated")
 
 
-def test_empty_file_is_scripted_pipeline_blocker():
-    result = parse("")
+MALFORMED_SOURCES = {
+    "missing stages section": "pipeline {\n    agent any\n}\n",
+    "empty stages section": (
+        "pipeline {\n    agent any\n    stages {\n    }\n}\n"
+    ),
+    "stage without steps section": (
+        "pipeline {\n    agent any\n    stages {\n"
+        "        stage('A') {\n            environment {\n"
+        "                X = 'y'\n            }\n        }\n    }\n}\n"
+    ),
+    "empty steps section": (
+        "pipeline {\n    agent any\n    stages {\n        stage('A') {\n"
+        "            steps {\n            }\n        }\n    }\n}\n"
+    ),
+    "empty file": "",
+    "comments-only file": "// nothing here\n",
+}
+
+
+@pytest.mark.parametrize("label", sorted(MALFORMED_SOURCES))
+def test_missing_required_structure_raises_malformed(label):
+    """Required declarative structure (per official Jenkins syntax docs:
+    'stages' with at least one stage, and a non-empty 'steps' section per
+    stage) is malformed input, distinct from valid-but-unsupported."""
+    with pytest.raises(MalformedPipelineError):
+        parse(MALFORMED_SOURCES[label])
+
+
+def test_empty_file_is_malformed():
+    with pytest.raises(MalformedPipelineError):
+        parse("")
+
+
+def test_scripted_pipeline_is_not_malformed():
+    """A scripted pipeline is valid-but-unsupported: parsed result carries
+    the PB-SCRIPT blocker; no malformed-pipeline exception."""
+    result = parse("node {\n    sh 'deploy'\n}\n")
+    assert result.pipeline is None
     assert blocker_codes(result) == [F.PB_SCRIPT]
 
 

@@ -73,14 +73,17 @@ def test_stages_become_ordered_steps_with_stage_names():
     parsed = wf(CLEAN)
     steps = parsed["jobs"]["migrated-pipeline"]["steps"]
     names = [s["name"] for s in steps]
-    assert names[0] == "Build"
-    assert names[1] == "Build (step 2)"
-    assert names[2] == "Build (step 3)"
-    assert names[3] == "Test"
+    # The implicit default checkout comes first, then the Build stage's
+    # explicit 'checkout scm' (kept, not deduplicated), then its other steps.
+    assert names[0] == "Checkout source (implicit)"
+    assert names[1] == "Build"
+    assert names[2] == "Build (step 2)"
+    assert names[3] == "Build (step 3)"
+    assert names[4] == "Test"
     # All steps in one job, in source order (shared workspace).
     run_texts = [s.get("run", "") for s in steps]
-    assert "make build" in run_texts[1]
-    assert "./run-tests.sh --dir \"$REPORTS_DIR\"" in run_texts[3]
+    assert "make build" in run_texts[2]
+    assert "./run-tests.sh --dir \"$REPORTS_DIR\"" in run_texts[4]
 
 
 def test_pipeline_env_at_job_level_and_stage_env_on_steps_only():
@@ -88,9 +91,9 @@ def test_pipeline_env_at_job_level_and_stage_env_on_steps_only():
     job = parsed["jobs"]["migrated-pipeline"]
     assert job["env"] == {"APP_ENV": "production"}
     steps = job["steps"]
-    assert steps[0]["env"] == {"BUILD_DIR": "target"}  # Build stage env on all its steps
-    assert steps[1]["env"] == {"BUILD_DIR": "target"}
-    assert "env" not in steps[3]  # Test stage has no stage env
+    assert steps[1]["env"] == {"BUILD_DIR": "target"}  # Build stage env on all its steps
+    assert steps[2]["env"] == {"BUILD_DIR": "target"}
+    assert "env" not in steps[4]  # Test stage has no stage env
 
 
 def test_checkout_is_pinned_to_full_sha_with_version():
@@ -101,13 +104,13 @@ def test_checkout_is_pinned_to_full_sha_with_version():
 
 def test_echo_becomes_printf():
     parsed = wf(CLEAN)
-    run = parsed["jobs"]["migrated-pipeline"]["steps"][2]["run"]
+    run = parsed["jobs"]["migrated-pipeline"]["steps"][3]["run"]
     assert run == "printf '%s\\n' 'build done'"
 
 
 def test_shell_variables_preserved_verbatim():
     parsed = wf(CLEAN)
-    run = parsed["jobs"]["migrated-pipeline"]["steps"][3]["run"]
+    run = parsed["jobs"]["migrated-pipeline"]["steps"][4]["run"]
     assert "export REPORTS_DIR=$PWD/reports" in run
     assert '"$REPORTS_DIR"' in run
 
@@ -231,11 +234,35 @@ def test_stage_name_with_yaml_specials_is_quoted():
     )
     parsed = wf(source)
     steps = parsed["jobs"]["migrated-pipeline"]["steps"]
-    assert steps[0]["name"] == 'Build & "Test"'
+    assert steps[1]["name"] == 'Build & "Test"'  # after the implicit checkout
 
 
 def test_generation_is_deterministic():
     assert gen(CLEAN) == gen(CLEAN)
+
+
+def test_implicit_checkout_precedes_first_translated_step():
+    """Jenkins checks out source by default before the first stage; the
+    generated workflow models this before the first translated step."""
+    steps = wf(CLEAN)["jobs"]["migrated-pipeline"]["steps"]
+    names = [s["name"] for s in steps]
+    assert names[0] == "Checkout source (implicit)"
+    assert names[0] != names[1]  # explicit 'checkout scm' kept: no dedup
+    assert steps[0]["uses"] == f"actions/checkout@{CHECKOUT_SHA}"
+
+
+def test_implicit_checkout_added_without_explicit_checkout():
+    source = CLEAN.replace("                checkout scm\n", "")
+    steps = wf(source)["jobs"]["migrated-pipeline"]["steps"]
+    assert steps[0]["name"] == "Checkout source (implicit)"
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    run = next(s["run"] for s in steps if s["name"] == "Build")
+    assert run == "make build"  # checkout precedes the build commands
+
+
+def test_no_implicit_checkout_when_pipeline_blocked():
+    source = CLEAN.replace("    agent any\n", "    agent none\n")
+    assert "Checkout source (implicit)" not in gen(source)
 
 
 def test_multiline_string_with_leading_indentation_roundtrips():
@@ -255,5 +282,5 @@ def test_multiline_string_with_leading_indentation_roundtrips():
     )
     text = gen(source)
     parsed = yaml.safe_load(text)
-    run = parsed["jobs"]["migrated-pipeline"]["steps"][0]["run"]
+    run = parsed["jobs"]["migrated-pipeline"]["steps"][1]["run"]
     assert run == "    echo starts-with-spaces\n                    echo second line\n                "
