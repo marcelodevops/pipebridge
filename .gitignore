@@ -229,3 +229,6 @@ __marimo__/
 !.env*.example
 !.env*.sample
 !.env*.template
+
+# Local git worktrees
+.worktrees/
