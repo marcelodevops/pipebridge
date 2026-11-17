@@ -12,7 +12,7 @@ import json
 import re
 
 from . import __version__
-from .analysis import AnalysisResult
+from .analysis import AnalysisResult, models_implicit_checkout
 from .model import EnvVar, Pipeline, Span, Stage
 
 # actions/checkout pinned to a verified full commit SHA.
@@ -188,8 +188,22 @@ def _stage_blocker_codes(blockers, stage: Stage, next_stage: Stage | None) -> li
     return sorted({f.code for f in blockers if stage.span.line <= f.line < upper})
 
 
+def _checkout_step_lines(name: str) -> list[str]:
+    """A pinned actions/checkout step (name is source-derived or implicit)."""
+    return [
+        f"      - name: {_yaml_scalar(escape_github_expressions(name))}",
+        f"        uses: {CHECKOUT_ACTION_REPO}@{CHECKOUT_ACTION_SHA}"
+        f" # {CHECKOUT_ACTION_VERSION} (pinned to full commit SHA)",
+    ]
+
+
 def _generate_steps(pipeline: Pipeline, blockers) -> list[str]:
     steps: list[str] = []
+    if models_implicit_checkout(pipeline):
+        # Model Jenkins' default SCM checkout: it happens before the first
+        # stage regardless of explicit 'checkout scm' steps, which are kept
+        # as-is (a later checkout can change workspace state).
+        steps.extend(_checkout_step_lines("Checkout source (implicit)"))
     for index, stage in enumerate(pipeline.stages):
         if pipeline.blocked:
             continue
@@ -212,6 +226,7 @@ def _generate_steps(pipeline: Pipeline, blockers) -> list[str]:
                         f"          {var.name}: {_yaml_scalar(escape_github_expressions(var.value))}"
                     )
             if step.kind == "checkout":
+                # The step's - name: line was already emitted above.
                 steps.append(
                     f"        uses: {CHECKOUT_ACTION_REPO}@{CHECKOUT_ACTION_SHA}"
                     f" # {CHECKOUT_ACTION_VERSION} (pinned to full commit SHA)"

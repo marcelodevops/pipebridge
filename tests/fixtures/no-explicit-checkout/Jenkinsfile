@@ -1,0 +1,13 @@
+// no-explicit-checkout: agent any with no explicit checkout step. Jenkins
+// performs a default SCM checkout before the first stage; the generated
+// workflow must model it.
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh 'make build'
+            }
+        }
+    }
+}

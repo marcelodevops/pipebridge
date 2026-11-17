@@ -30,6 +30,7 @@ def test_clean_pipeline_has_assumption_findings_only():
         F.PB_SINGLE_JOB,
         F.PB_TRIGGER_MANUAL,
         F.PB_ASSUME_RUNNER,
+        F.PB_ASSUME_CHECKOUT,  # implicit default checkout (modeled, line 4)
     ]
     runner = next(f for f in result.findings if f.code == F.PB_ASSUME_RUNNER)
     assert (runner.line, runner.col) == (2, 5)
@@ -37,11 +38,24 @@ def test_clean_pipeline_has_assumption_findings_only():
     assert "does not establish" in runner.message
 
 
+def test_implicit_checkout_assumption_reported_once():
+    """The default checkout is modeled for translated pipelines even without
+    an explicit 'checkout scm', positioned at the first stage."""
+    result = analyze_source(CLEAN)
+    implicit = [f for f in result.findings if f.code == F.PB_ASSUME_CHECKOUT]
+    assert len(implicit) == 1
+    assert (implicit[0].line, implicit[0].col) == (4, 9)
+    assert "implicit" in implicit[0].message
+
+
 def test_checkout_scm_adds_checkout_assumption():
     result = analyze_source(CLEAN.replace("sh 'make build'", "checkout scm"))
-    assert F.PB_ASSUME_CHECKOUT in codes(result)
-    checkout = next(f for f in result.findings if f.code == F.PB_ASSUME_CHECKOUT)
-    assert (checkout.line, checkout.col) == (6, 17)
+    # The implicit default checkout AND the explicit 'checkout scm' are both
+    # reported: Jenkins performs both (no deduplication).
+    checkouts = [f for f in result.findings if f.code == F.PB_ASSUME_CHECKOUT]
+    assert len(checkouts) == 2
+    explicit = next(f for f in checkouts if "implicit" not in f.message)
+    assert (explicit.line, explicit.col) == (6, 17)
 
 
 def test_jenkins_variable_reference_is_reported_once_per_variable():

@@ -80,6 +80,22 @@ def analyze_source(source_text: str) -> AnalysisResult:
     return AnalysisResult(findings=findings, pipeline=pipeline, source_sha256=sha)
 
 
+def models_implicit_checkout(pipeline: Pipeline) -> bool:
+    """True when pipebridge models Jenkins' default SCM checkout.
+
+    Jenkins checks out source from SCM when the agent is allocated, before
+    the first stage runs (the 'Default Checkout' behavior, suppressed only
+    by ``skipDefaultCheckout`` — an option the MVP keeps blocked, so it is
+    never in scope here). The checkout is modeled whenever the pipeline was
+    actually translated: not blocked and at least one step translated.
+    Explicit ``checkout scm`` steps are preserved as-is and never
+    deduplicated against it (a later checkout can change workspace state).
+    """
+    if pipeline.blocked or not pipeline.stages:
+        return False
+    return any(stage.steps for stage in pipeline.stages)
+
+
 def _standard_assumptions(pipeline: Pipeline) -> list[Finding]:
     base = pipeline.span
     out = [
@@ -145,6 +161,29 @@ def _standard_assumptions(pipeline: Pipeline) -> list[Finding]:
 def _scan_translated(pipeline: Pipeline) -> list[Finding]:
     """Scan translated text for Jenkins variables and GitHub expressions."""
     findings: list[Finding] = []
+    if models_implicit_checkout(pipeline):
+        first = pipeline.stages[0]
+        findings.append(
+            Finding(
+                code=PB_ASSUME_CHECKOUT,
+                severity="info",
+                construct="default SCM checkout (implicit)",
+                message=(
+                    "Jenkins checks out source from SCM before the first stage "
+                    "(default checkout). An implicit 'Checkout source (implicit)' "
+                    "step was inserted before the first translated step, in "
+                    "addition to any explicit 'checkout scm' steps (Jenkins "
+                    "performs both; checkouts are not deduplicated). This "
+                    "assumes the workflow runs in the migrated source repository."
+                ),
+                line=first.span.line,
+                col=first.span.col,
+                suggestion=(
+                    "If the Jenkins job did not check out source (e.g. it only "
+                    "used artifacts), remove the implicit checkout step."
+                ),
+            )
+        )
     for stage in pipeline.stages:
         findings.extend(_scan_github_expressions(stage.name, stage.dollar_spans, "stage name"))
         for step in stage.steps:

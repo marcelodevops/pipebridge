@@ -10,6 +10,7 @@ from pipebridge.cli import main
 
 FIXTURES = {
     "build-and-test": 0,
+    "no-explicit-checkout": 0,
     "container-credentials": 2,
     "terraform-approval": 2,
     "k8s-custom-agent": 2,
@@ -47,6 +48,7 @@ def test_build_and_test_conversion(tmp_path):
     assert job["runs-on"] == "ubuntu-latest"
     names = [s["name"] for s in job["steps"]]
     assert names == [
+        "Checkout source (implicit)",
         "Checkout",
         "Build",
         "Build (step 2)",
@@ -54,6 +56,10 @@ def test_build_and_test_conversion(tmp_path):
         "Test",
         "Report",
     ]
+    # Jenkins' default checkout is modeled before the first translated step;
+    # the explicit 'checkout scm' is preserved (a later checkout can change
+    # workspace state, so no deduplication).
+    assert job["steps"][0]["uses"].startswith("actions/checkout@")
 
     # Pipeline env at job level; stage env only on that stage's steps.
     assert job["env"] == {"APP_ENV": "ci", "VERSION": "1.0.0"}
@@ -88,6 +94,29 @@ def test_build_and_test_conversion(tmp_path):
     assert report["validation"]["yaml_parse"]["ok"] is True
     assert report["validation"]["actionlint"]["ok"] is True
     assert report["validation"]["runtime"]["performed"] is False
+
+
+def test_no_explicit_checkout_still_checks_out_source(tmp_path):
+    """Issue 2: a pipeline with 'agent any' and no explicit 'checkout scm'
+    must still get a source checkout before the build commands, and the
+    report must disclose the assumption."""
+    jf = f"{__import__('pathlib').Path(__file__).parent}/fixtures/no-explicit-checkout/Jenkinsfile"
+    out = tmp_path / "migration"
+    assert main(["convert", jf, "--output", str(out)]) == 0
+
+    parsed = yaml.safe_load((out / "workflow.yml").read_text())
+    steps = parsed["jobs"]["migrated-pipeline"]["steps"]
+    names = [s["name"] for s in steps]
+    assert names[0] == "Checkout source (implicit)"
+    assert names.index("Checkout source (implicit)") < names.index("Build")
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    assert len(steps[0]["uses"].split("@")[1].split()[0]) == 40  # full SHA
+
+    report = json.loads((out / "migration-report.json").read_text())
+    checkout = next(
+        f for f in report["findings"] if f["code"] == "PB-ASSUME-CHECKOUT" and "implicit" in f["message"]
+    )
+    assert checkout["severity"] == "info"
 
 
 def test_container_credentials_conversion(tmp_path):
@@ -125,12 +154,19 @@ def test_terraform_approval_conversion(tmp_path):
     assert isinstance(job["env"]["TF_IN_AUTOMATION"], str)
 
     names = [s["name"] for s in job["steps"]]
-    assert names == ["Init", "Init (step 2)", "Plan", "Plan (step 2)", "[NOT MIGRATED] Deploy"]
+    assert names == [
+        "Checkout source (implicit)",
+        "Init",
+        "Init (step 2)",
+        "Plan",
+        "Plan (step 2)",
+        "[NOT MIGRATED] Deploy",
+    ]
 
     # Translated stages keep their commands; the blocked stage does not.
-    init_run = job["steps"][1]["run"]
+    init_run = job["steps"][2]["run"]
     assert init_run == "terraform init -input=false"
-    deploy_run = job["steps"][4]["run"]
+    deploy_run = job["steps"][5]["run"]
     assert "terraform apply" not in deploy_run
     assert "exit 1" in deploy_run
 
@@ -194,7 +230,8 @@ def test_github_expression_injection_end_to_end(tmp_path):
     workflow_text = (out / "workflow.yml").read_text()
     assert "${{ '${{' }}" in workflow_text  # neutralized in the YAML source
     parsed = yaml.safe_load(workflow_text)
-    run = parsed["jobs"]["migrated-pipeline"]["steps"][0]["run"]
+    steps = parsed["jobs"]["migrated-pipeline"]["steps"]
+    run = next(s["run"] for s in steps if s["name"] == "Deploy")
     # After GitHub's own substitution the shell sees the original literal.
     assert run.replace("${{ '${{' }}", "${{") == "./deploy ${{ secrets.DEPLOY_TOKEN }}"
 
