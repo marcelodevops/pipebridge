@@ -64,7 +64,7 @@ Produces:
 
 pipebridge **never overwrites existing outputs by default**. Add `--force` to replace previously generated files.
 
-Generation is staged: all artifacts are written to unique temporary files and the previous contents backed up **before** anything is replaced. A handled failure (disk full, permission error) during staging or while committing rolls back — previous files are restored byte-for-byte, newly introduced outputs are removed, and temporary files are cleaned. This is deliberately **not** a crash-atomic multi-file transaction: a process kill between the individual file replacements can still leave a partial set on disk. Output paths that would overwrite the input Jenkinsfile (including via symlink) are rejected before anything is written.
+Generation is staged: all artifacts are written to unique temporary files and the previous contents backed up **before** anything is replaced. Temporary and backup paths are registered before the write or copy that creates them, so a failure that leaves partially written bytes on disk is still cleaned up. A handled failure (disk full, permission error) during staging or while committing rolls back — previous files are restored byte-for-byte, newly introduced outputs are removed, and temporary files are cleaned; this is reported as a **complete rollback**. If a restoration itself fails, the rollback is reported as **incomplete**: the backup holding the only surviving copy of the original bytes is **never deleted**, and the error names each affected target and the exact recovery-backup path for manual recovery. This is deliberately **not** a crash-atomic multi-file transaction: a process kill between the individual file replacements can still leave a partial set on disk. Output paths that would overwrite the input Jenkinsfile (including via symlink) are rejected before anything is written.
 
 ### `pipebridge --version`
 
@@ -333,7 +333,7 @@ The report is explicit about what was and was not read.
 - `echo` becomes `printf '%s\n'` to preserve semantics; output is identical but the command differs.
 - The runner assumption (`ubuntu-latest`) is just that — an assumption. Jenkins `agent any` guarantees nothing about OS, tools, or network.
 - The implicit checkout models Jenkins' default behavior but cannot verify the migrated repository is the right source; a pipeline that never checked out source (artifact-only jobs) must have the implicit step removed by a human.
-- Multi-file output replacement is staged with rollback, but is **not** crash-atomic: a process kill between the individual file renames can leave a partial set on disk. Handled failures (I/O errors) roll back byte-for-byte.
+- Multi-file output replacement is staged with rollback, but is **not** crash-atomic: a process kill between the individual file renames can leave a partial set on disk. Handled failures (I/O errors) roll back byte-for-byte; if a rollback restoration itself fails, the rollback is incomplete — the original bytes remain in a recovery backup whose path is reported, and a human must restore it.
 - `actionlint` runs only when installed locally; the report says so explicitly either way.
 - Generated workflows are **never executed** by pipebridge; "passes validation" means YAML parsing and linting only.
 - No confidence percentage: pipebridge reports facts, not vibes.
@@ -350,7 +350,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-Tests cover source positions and nested blocks, comments/braces inside strings, all string forms, shell variable preservation, environment scope, shared workspace across sequential stages, unknown syntax, unsupported enclosing blocks, GitHub expression injection through source literals (including executing generated commands under `bash` to verify literal preservation), implicit source checkout, required-structure validation and exit codes, staged writes with rollback under injected failures, and overwrite protection. `actionlint` (optional) is exercised on generated workflows when present, with dedicated tests for absent, failing, and unexecutable states; the suite passes without it (those tests skip honestly).
+Tests cover source positions and nested blocks, comments/braces inside strings, all string forms, shell variable preservation, environment scope, shared workspace across sequential stages, unknown syntax, unsupported enclosing blocks, GitHub expression injection through source literals (including executing generated commands under `bash` to verify literal preservation), implicit source checkout, required-structure validation and exit codes, staged writes under injected failures (commit-time rollback including failed restorations that preserve recovery backups, and partial staging/backup writes), and overwrite protection. `actionlint` (optional) is exercised on generated workflows when present, with dedicated tests for absent, failing, and unexecutable states; the suite passes without it (those tests skip honestly).
 
 CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10 (the declared minimum) and 3.13, lints the repository's workflows with a checksum-verified pinned actionlint, builds the package, and smoke-tests the installed CLI outside the source directory — using minimal permissions and full-SHA action pins.
 
