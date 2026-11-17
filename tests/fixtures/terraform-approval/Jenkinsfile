@@ -1,0 +1,29 @@
+pipeline {
+    agent any
+    environment {
+        TF_IN_AUTOMATION = 'true'
+    }
+    stages {
+        stage('Init') {
+            steps {
+                checkout scm
+                sh 'terraform init -input=false'
+            }
+        }
+        stage('Plan') {
+            steps {
+                sh 'terraform plan -out=tfplan'
+                sh 'echo "Plan for build $BUILD_NUMBER ready"'
+            }
+        }
+        stage('Deploy') {
+            input {
+                message 'Apply this plan?'
+            }
+            steps {
+                echo "Deploying build ${BUILD_NUMBER}"
+                sh 'terraform apply -auto-approve tfplan'
+            }
+        }
+    }
+}

@@ -1,0 +1,40 @@
+// build-and-test: a fully supported declarative pipeline (MVP scope).
+pipeline {
+    agent any
+    environment {
+        APP_ENV = 'ci'
+        VERSION = '1.0.0'
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Build') {
+            environment {
+                BUILD_DIR = 'dist'
+            }
+            steps {
+                sh 'mkdir -p "$BUILD_DIR"'
+                sh 'make build VERSION=$VERSION'
+                echo 'Build finished'
+            }
+        }
+        stage('Test') {
+            steps {
+                sh '''
+# braces { and comments # inside the string are shell data
+export REPORTS_DIR=$PWD/reports
+mkdir -p "$REPORTS_DIR"
+./run-tests.sh --reports-dir "$REPORTS_DIR" --version "$VERSION"
+'''
+            }
+        }
+        stage('Report') {
+            steps {
+                sh 'echo "Build $BUILD_NUMBER completed"'
+            }
+        }
+    }
+}

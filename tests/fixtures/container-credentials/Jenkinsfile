@@ -1,0 +1,29 @@
+// container-credentials: Docker agent and bound credentials require manual migration.
+pipeline {
+    agent {
+        docker {
+            image 'node:20-bookworm'
+            args '-v /var/run/docker.sock:/var/run/docker.sock'
+            registryCredentialsId 'dockerhub-secret'
+        }
+    }
+    environment {
+        NPM_TOKEN = credentials('npm-registry-token')
+    }
+    stages {
+        stage('Build') {
+            steps {
+                sh 'npm ci'
+                sh 'npm run build'
+            }
+        }
+        stage('Publish') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'registry-auth', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+                    sh 'echo "$REG_PASS" | docker login -u "$REG_USER" --password-stdin registry.example.com'
+                    sh 'docker push registry.example.com/acme/app:latest'
+                }
+            }
+        }
+    }
+}
