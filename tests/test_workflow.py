@@ -176,10 +176,15 @@ def test_pipeline_level_blocker_produces_skeleton_without_steps():
     parsed = yaml.safe_load(text)
     job = parsed["jobs"]["migrated-pipeline"]
     assert job["if"] is False
-    assert "steps" not in job
     assert "PB-AGENT" in text
+    # A job requires a steps section: the only content is a loud placeholder.
+    steps = job["steps"]
+    assert len(steps) == 1
+    assert steps[0]["name"] == "[NOT MIGRATED] pipeline"
+    assert "make build" not in steps[0]["run"]  # never extracted
+    assert "exit 1" in steps[0]["run"]
     # Stage name still listed (as a comment) for review.
-    assert 'stage "Build"' in text or "Build" in text
+    assert 'stage "Build" (line 8)' in text
 
 
 def test_yaml_special_env_values_roundtrip_as_strings():

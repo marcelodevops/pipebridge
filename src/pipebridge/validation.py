@@ -10,8 +10,11 @@ Validation has honest, separate levels that are reported distinctly:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 import yaml
 
@@ -28,8 +31,12 @@ def validate_yaml_text(text: str) -> dict:
     return {"ok": True, "error": None, "note": "yaml.safe_load"}
 
 
-def run_actionlint(path) -> dict:
-    """Run actionlint on a file; ok=None means the check did not run."""
+def run_actionlint(path, ignore: list[str] | None = None) -> dict:
+    """Run actionlint on a file; ok=None means the check did not run.
+
+    ``ignore`` lists actionlint error-message regexps to suppress (each
+    suppression must be disclosed in reports).
+    """
     executable = shutil.which("actionlint")
     if executable is None:
         return {
@@ -46,8 +53,12 @@ def run_actionlint(path) -> dict:
             timeout=_ACTIONLINT_TIMEOUT_SECONDS,
             check=False,
         )
+        command = [executable, "-no-color"]
+        for pattern in ignore or []:
+            command.extend(["-ignore", pattern])
+        command.append(str(path))
         proc = subprocess.run(
-            [executable, "-no-color", str(path)],
+            command,
             capture_output=True,
             text=True,
             timeout=_ACTIONLINT_TIMEOUT_SECONDS,
@@ -65,29 +76,37 @@ def run_actionlint(path) -> dict:
     output = (proc.stdout + proc.stderr).strip()
     if proc.returncode not in (0, 1):
         output = f"actionlint exited unexpectedly ({proc.returncode}): {output}"
-    return {
+    result = {
         "available": True,
         "ok": ok,
         "exit_code": proc.returncode,
         "output": output,
         "version": version_first,
     }
+    if ignore:
+        result["ignored_rules"] = list(ignore)
+    return result
 
 
-def validate_generated_workflow(workflow_text: str, workflow_path) -> dict:
+def validate_generated_workflow(workflow_text: str, workflow_path, disabled: bool = False) -> dict:
     """Validate a generated workflow before anything is written.
 
     Raises :class:`ValidationError` when the generated workflow is not
-    valid, so a failed conversion never leaves artifacts behind.
+    valid, so a failed conversion never leaves artifacts behind. When
+    ``disabled`` (blockers exist), the deliberate constant-false job
+    condition is disclosed as the single suppressed lint rule.
     """
     yaml_result = validate_yaml_text(workflow_text)
     if not yaml_result["ok"]:
         raise ValidationError(f"generated workflow is not valid YAML: {yaml_result['error']}")
 
-    temp_path = workflow_path.with_name(workflow_path.name + ".actionlint-tmp")
+    # Lint from a temp file in the system temp directory: this runs BEFORE
+    # any output directory is created, so a failed validation leaves nothing.
+    ignore = ['constant expression "false" in condition'] if disabled else []
+    temp_path = Path(tempfile.gettempdir()) / f"pipebridge-actionlint-{os.getpid()}.yml"
     temp_path.write_text(workflow_text, encoding="utf-8")
     try:
-        lint_result = run_actionlint(temp_path)
+        lint_result = run_actionlint(temp_path, ignore=ignore)
     finally:
         temp_path.unlink(missing_ok=True)
     if lint_result.get("available") and lint_result.get("ok") is False:

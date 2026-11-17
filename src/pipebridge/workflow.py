@@ -116,14 +116,40 @@ def generate_workflow(analysis: AnalysisResult, source_name: str = "Jenkinsfile"
             lines.append(f"      {var.name}: {_yaml_scalar(escape_github_expressions(var.value))}")
 
     steps = _generate_steps(pipeline, blockers)
+    if not steps and pipeline.stages:
+        # A job requires a steps section; when nothing was translated
+        # (pipeline-level blockers), emit a single loud placeholder.
+        stage_lines = [
+            f'      #   - stage "{stage.name}" (line {stage.span.line})'
+            for stage in pipeline.stages
+        ]
+        codes = ", ".join(sorted({f.code for f in blockers})) or "see report"
+        steps = [
+            "      # No steps were translated: the pipeline contains pipeline-level",
+            f"      # blockers ({codes}). Stages found in the source, for manual migration:",
+            *stage_lines,
+            *_placeholder_step("pipeline", codes),
+        ]
     if steps:
         lines.append("    steps:")
         lines.extend(steps)
-    else:
-        lines.extend(_skeleton_stage_comments(pipeline))
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _placeholder_step(name: str, codes: str) -> list[str]:
+    """A placeholder step that fails loudly instead of pretending to succeed."""
+    message = (
+        f'"{name}" was not migrated: it contains migration blockers ({codes}).'
+        " Read migration-report.md and fix deliberately before enabling this"
+        " workflow."
+    )
+    script = f"echo {_single_quote_shell(message)} >&2\nexit 1"
+    return [
+        f"      - name: {_yaml_scalar('[NOT MIGRATED] ' + name)}",
+        f"        run: {_render_block(script, indent=8)}",
+    ]
 
 
 def _stage_blocker_codes(blockers, stage: Stage, next_stage: Stage | None) -> list[str]:
@@ -140,18 +166,11 @@ def _generate_steps(pipeline: Pipeline, blockers) -> list[str]:
         if stage.blocked:
             next_stage = pipeline.stages[index + 1] if index + 1 < len(pipeline.stages) else None
             codes = ", ".join(_stage_blocker_codes(blockers, stage, next_stage)) or "see report"
-            loc = f"line {stage.span.line}"
             steps.append(
-                f'      # Stage "{stage.name}" ({loc}) was NOT migrated: it contains'
+                f'      # Stage "{stage.name}" (line {stage.span.line}) was NOT migrated: it contains'
             )
             steps.append(f"      # unsupported constructs ({codes}). See the migration report.")
-            steps.append(f"      - name: {_yaml_scalar('[NOT MIGRATED] ' + stage.name)}")
-            message = (
-                f'Stage "{stage.name}" was not migrated: it contains migration'
-                f" blockers ({codes}). Read migration-report.md and fix deliberately"
-                " before enabling this workflow."
-            )
-            steps.append(f"        run: {_render_block(message + ' >&2\\nexit 1', indent=8)}")
+            steps.extend(_placeholder_step(stage.name, codes))
             continue
         for idx, step in enumerate(stage.steps, start=1):
             name = stage.name if idx == 1 else f"{stage.name} (step {idx})"
@@ -174,16 +193,6 @@ def _generate_steps(pipeline: Pipeline, blockers) -> list[str]:
                 command = escape_github_expressions(step.text)
             steps.append(f"        run: {_render_block(command, indent=8)}")
     return steps
-
-
-def _skeleton_stage_comments(pipeline: Pipeline) -> list[str]:
-    out = [
-        "    # No steps were translated: the pipeline contains pipeline-level",
-        "    # blockers. Stages found in the source (for manual migration):",
-    ]
-    for stage in pipeline.stages:
-        out.append(f'    #   - stage "{stage.name}" (line {stage.span.line})')
-    return out
 
 
 def _render_block(text: str, indent: int) -> str:
