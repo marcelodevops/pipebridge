@@ -90,9 +90,15 @@ def test_build_and_test_conversion(tmp_path):
     on_disk = hashlib.sha256(open(jf, "rb").read()).hexdigest()
     assert report["source"]["sha256"] == on_disk
 
-    # Validation was performed and is honest about runtime.
+    # Validation was performed and is honest about runtime — and about
+    # optional tooling: actionlint may be absent locally.
     assert report["validation"]["yaml_parse"]["ok"] is True
-    assert report["validation"]["actionlint"]["ok"] is True
+    actionlint = report["validation"]["actionlint"]
+    if actionlint["available"]:
+        assert actionlint["ok"] is True
+    else:
+        assert actionlint["ok"] is None
+        assert "not installed" in actionlint["output"]
     assert report["validation"]["runtime"]["performed"] is False
 
 
