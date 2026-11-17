@@ -51,6 +51,9 @@ class Decoded:
     kind: str
     value: str | None
     interpolations: list[Interpolation] = field(default_factory=list)
+    # (offset_in_value, line, col) of every literal '$' that reached the
+    # decoded value; used to report Jenkins variable references precisely.
+    dollar_spans: list[tuple[int, int, int]] = field(default_factory=list)
 
     @property
     def has_interpolation(self) -> bool:
@@ -71,6 +74,7 @@ def decode_string(raw: str, kind: str, line: int, col: int) -> Decoded:
 
     out: list[str] = []
     interpolations: list[Interpolation] = []
+    dollar_spans: list[tuple[int, int, int]] = []
     # cur_line/cur_col track the source position of the current body char;
     # the opening delimiter occupies `len(open_d)` columns after (line, col).
     cur_line, cur_col = line, col + len(open_d)
@@ -102,6 +106,8 @@ def decode_string(raw: str, kind: str, line: int, col: int) -> Decoded:
                     pass  # line continuation contributes nothing
                 elif esc in _ESCAPE_MAP:
                     out.append(_ESCAPE_MAP[esc])
+                    if _ESCAPE_MAP[esc] == "$":
+                        dollar_spans.append((len(out) - 1, cur_line, cur_col + 1))
                 else:
                     out.append("\\" + esc)
             pos += 1
@@ -135,12 +141,16 @@ def decode_string(raw: str, kind: str, line: int, col: int) -> Decoded:
             continue
 
         out.append(ch)
+        if ch == "$":
+            dollar_spans.append((len(out) - 1, cur_line, cur_col))
         pos += 1
         cur_col += 1
 
     if interpolations:
-        return Decoded(raw=raw, kind=kind, value=None, interpolations=interpolations)
-    return Decoded(raw=raw, kind=kind, value="".join(out))
+        return Decoded(
+            raw=raw, kind=kind, value=None, interpolations=interpolations, dollar_spans=dollar_spans
+        )
+    return Decoded(raw=raw, kind=kind, value="".join(out), dollar_spans=dollar_spans)
 
 
 def _is_hex4(s: str) -> bool:

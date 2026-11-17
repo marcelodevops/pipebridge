@@ -399,6 +399,7 @@ class _Parser:
             self._advance()
             if pipeline_level:
                 self.pipeline.has_agent_any = True
+                self.pipeline.agent_span = Span(tok.line, tok.col)
             return
         if nxt.kind == IDENT and nxt.value == "none":
             self._advance()
@@ -510,7 +511,14 @@ class _Parser:
                 )
                 self._mark_env_scope_blocked(scope)
                 return
-            target.append(EnvVar(name_tok.value, decoded.value, Span(tok.line, tok.col)))
+            target.append(
+                EnvVar(
+                    name_tok.value,
+                    decoded.value,
+                    Span(tok.line, tok.col),
+                    dollar_spans=tuple(decoded.dollar_spans),
+                )
+            )
             return
         if tok.kind == "NUMBER":
             # Jenkins stringifies numeric environment values: meaning preserved.
@@ -653,6 +661,7 @@ class _Parser:
         stage = Stage(
             name=stage_name if stage_name is not None else "<unparsed stage>",
             span=Span(header.line, header.col),
+            dollar_spans=tuple(decoded.dollar_spans) if decoded is not None and not decoded.has_interpolation else (),
         )
         self.pipeline.stages.append(stage)
 
@@ -974,9 +983,11 @@ class _Parser:
     def _add_sh_step(self, stage: Stage, tok, span: Span) -> None:
         decoded = self._decode_step_string(tok, "sh")
         if decoded is None:
-            stage.blocked = True
+            self._mark_stage_blocked(stage)
             return
-        stage.steps.append(Step(kind="sh", text=decoded.value, span=span))
+        stage.steps.append(
+            Step(kind="sh", text=decoded.value, span=span, dollar_spans=tuple(decoded.dollar_spans))
+        )
 
     def _parse_echo(self, stage: Stage, span: Span) -> None:
         tok = self._peek()
@@ -986,7 +997,9 @@ class _Parser:
             if decoded is None:
                 self._mark_stage_blocked(stage)
                 return
-            stage.steps.append(Step(kind="echo", text=decoded.value, span=span))
+            stage.steps.append(
+                Step(kind="echo", text=decoded.value, span=span, dollar_spans=tuple(decoded.dollar_spans))
+            )
             return
         self._add(
             PB_SYNTAX,
