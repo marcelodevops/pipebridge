@@ -1,0 +1,147 @@
+{
+  "tool": {
+    "name": "pipebridge",
+    "version": "0.1.0"
+  },
+  "generated_at": "2026-11-17T23:21:41Z",
+  "source": {
+    "path": "examples/python-build/Jenkinsfile",
+    "sha256": "7c680aa3e5b21c16f444f95d4817d5877b163556ebb71c468e52c5403666a354"
+  },
+  "exit_code": 0,
+  "summary": {
+    "blockers": 0,
+    "warnings": 0,
+    "info": 6,
+    "translated_stages": 3,
+    "translated_steps": 4
+  },
+  "findings": [
+    {
+      "code": "PB-ASSUME-SHELL",
+      "severity": "info",
+      "construct": "shell execution environment",
+      "message": "Steps run under 'bash --noprofile --norc -eo pipefail' on GitHub Actions; Jenkins 'sh' uses '/bin/sh -xe'. Shell differences (pipefail, tracing, tool availability) may change behavior.",
+      "line": 2,
+      "col": 1,
+      "suggestion": "Review each command under 'set -eo pipefail' bash semantics."
+    },
+    {
+      "code": "PB-SINGLE-JOB",
+      "severity": "info",
+      "construct": "sequential stages",
+      "message": "All sequential stages are kept in a single GitHub Actions job so filesystem state (the Jenkins executor workspace) is preserved between stages.",
+      "line": 2,
+      "col": 1,
+      "suggestion": "Split into multiple jobs only with explicit needs/ and artifact passing."
+    },
+    {
+      "code": "PB-TRIGGER-MANUAL",
+      "severity": "info",
+      "construct": "workflow trigger",
+      "message": "The generated workflow triggers on workflow_dispatch only.",
+      "line": 2,
+      "col": 1,
+      "suggestion": "Add push/pull_request/schedule triggers deliberately after review."
+    },
+    {
+      "code": "PB-ASSUME-RUNNER",
+      "severity": "info",
+      "construct": "agent any",
+      "message": "'agent any' does not establish the required OS, installed tools, or network access; the generated workflow assumes the 'ubuntu-latest' runner.",
+      "line": 3,
+      "col": 5,
+      "suggestion": "Verify the runner image provides every tool the commands need."
+    },
+    {
+      "code": "PB-ASSUME-CHECKOUT",
+      "severity": "info",
+      "construct": "default SCM checkout (implicit)",
+      "message": "Jenkins checks out source from SCM before the first stage (default checkout). An implicit 'Checkout source (implicit)' step was inserted before the first translated step, in addition to any explicit 'checkout scm' steps (Jenkins performs both; checkouts are not deduplicated). This assumes the workflow runs in the migrated source repository.",
+      "line": 5,
+      "col": 9,
+      "suggestion": "If the Jenkins job did not check out source (e.g. it only used artifacts), remove the implicit checkout step."
+    },
+    {
+      "code": "PB-ASSUME-CHECKOUT",
+      "severity": "info",
+      "construct": "checkout scm",
+      "message": "'checkout scm' is translated to the pinned actions/checkout step; the workflow is assumed to run in the migrated source repository.",
+      "line": 7,
+      "col": 17,
+      "suggestion": "Confirm the workflow's repository matches the Jenkins SCM."
+    }
+  ],
+  "blockers": [],
+  "assumptions": [
+    "PB-ASSUME-SHELL",
+    "PB-SINGLE-JOB",
+    "PB-TRIGGER-MANUAL",
+    "PB-ASSUME-RUNNER",
+    "PB-ASSUME-CHECKOUT",
+    "PB-ASSUME-CHECKOUT"
+  ],
+  "translated": [
+    {
+      "stage": "Checkout",
+      "source_line": 5,
+      "blocked": false,
+      "steps": [
+        {
+          "kind": "checkout",
+          "source_line": 7,
+          "detail": "checkout scm"
+        }
+      ]
+    },
+    {
+      "stage": "Test",
+      "source_line": 10,
+      "blocked": false,
+      "steps": [
+        {
+          "kind": "sh",
+          "source_line": 12,
+          "detail": "PYTHONPATH=. python3 -m unittest discover -s tests -v"
+        }
+      ]
+    },
+    {
+      "stage": "Build",
+      "source_line": 15,
+      "blocked": false,
+      "steps": [
+        {
+          "kind": "sh",
+          "source_line": 17,
+          "detail": "python3 -m pip install build"
+        },
+        {
+          "kind": "sh",
+          "source_line": 18,
+          "detail": "python3 -m build"
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "yaml_parse": {
+      "ok": true,
+      "error": null,
+      "note": "yaml.safe_load"
+    },
+    "actionlint": {
+      "available": true,
+      "ok": true,
+      "exit_code": 0,
+      "output": "",
+      "version": "1.7.12",
+      "shellcheck_notes": null,
+      "structural_errors": null
+    },
+    "runtime": {
+      "performed": false,
+      "note": "Not performed: pipebridge does not execute generated workflows. YAML parsing and actionlint are static checks only; validate at runtime by dispatching the workflow manually."
+    }
+  }
+}
