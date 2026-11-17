@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
-import tempfile
+import uuid
 from pathlib import Path
 
 from . import __version__
@@ -179,7 +180,8 @@ def _cmd_convert(args) -> int:
             (targets[0], workflow_text),
             (targets[1], markdown_text),
             (targets[2], json_text),
-        ]
+        ],
+        protected=path,
     )
 
     summary = report["summary"]
@@ -198,19 +200,108 @@ def _cmd_convert(args) -> int:
     return int(report["exit_code"])
 
 
-def _write_all(items: list[tuple[Path, str]]) -> None:
-    """Write files via temp+rename; on failure, remove partial artifacts."""
-    written: list[Path] = []
+def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> None:
+    """Stage every artifact, then commit replacements one rename at a time.
+
+    Guarantees (deliberately honest — this is NOT a crash-atomic
+    multi-file transaction; a process kill between renames can leave a
+    partial set on disk):
+
+    - Nothing is written until ALL artifacts are staged and the previous
+      contents backed up; staging/backup failures leave every target
+      untouched.
+    - A handled (OSError) failure during the commit renames rolls back:
+      previously existing files are restored byte-for-byte from backups,
+      newly introduced outputs are removed, and all temporary files are
+      cleaned. Unrelated files are never touched. Rollback itself is
+      best-effort: if the rollback I/O also fails, that failure is
+      reported in the raised error.
+    - Temporary paths are unique per run (uuid-suffixed) so parallel or
+      repeated runs cannot collide.
+    - Any target that resolves to ``protected`` (the input Jenkinsfile) is
+      rejected before anything is written.
+    """
+    protected_resolved = protected.resolve() if protected is not None else None
+    for target, _content in items:
+        if protected_resolved is not None and target.resolve() == protected_resolved:
+            raise PipebridgeError(
+                f"refusing to overwrite the input Jenkinsfile: {target}"
+            )
+
+    staged: list[tuple[Path, Path]] = []  # (temp, target)
+    backups: list[tuple[Path, Path]] = []  # (backup, target), existing targets only
+    committed: list[tuple[Path, Path | None]] = []  # (target, backup-or-None)
     try:
+        # Phase 1: stage every artifact next to its target (same directory
+        # => same filesystem => the later rename is atomic).
         for target, content in items:
-            temp = target.with_name(f".{target.name}.tmp")
+            temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             temp.write_text(content, encoding="utf-8")
-            os.replace(temp, target)
-            written.append(target)
-    except OSError:
-        for target in written:
-            target.unlink(missing_ok=True)
-        raise PipebridgeError(f"failed writing generated files: {items[-1][0]}")
+            staged.append((temp, target))
+
+        # Phase 2: back up every pre-existing target byte-for-byte.
+        for _temp, target in staged:
+            if target.exists():
+                backup = target.with_name(f".{target.name}.{uuid.uuid4().hex}.bak")
+                shutil.copyfile(target, backup)
+                backups.append((backup, target))
+
+        # Phase 3: commit. On a handled failure, undo everything that was
+        # committed so far.
+        try:
+            for temp, target in staged:
+                os.replace(temp, target)
+                committed.append((target, _backup_for(backups, target)))
+        except OSError as exc:
+            rollback_errors = _rollback(committed)
+            message = f"failed writing generated files: {exc}; rolled back"
+            if rollback_errors:
+                message += " (rollback errors: " + "; ".join(rollback_errors) + ")"
+            raise PipebridgeError(message) from exc
+    except PipebridgeError:
+        _cleanup(staged, backups)
+        raise
+    except OSError as exc:
+        _cleanup(staged, backups)
+        raise PipebridgeError(f"failed writing generated files: {exc}") from exc
+    # Success: consume the backups (they are no longer needed).
+    for backup, _target in backups:
+        backup.unlink(missing_ok=True)
+
+
+def _backup_for(backups: list[tuple[Path, Path]], target: Path) -> Path | None:
+    for backup, backed_up in backups:
+        if backed_up == target:
+            return backup
+    return None
+
+
+def _rollback(committed: list[tuple[Path, Path | None]]) -> list[str]:
+    """Undo committed replacements, newest first; returns error messages."""
+    errors: list[str] = []
+    for target, backup in reversed(committed):
+        try:
+            if backup is not None:
+                os.replace(backup, target)  # byte-for-byte restore
+            else:
+                target.unlink(missing_ok=True)  # newly introduced: remove
+        except OSError as exc:
+            errors.append(f"{target}: {exc}")
+    return errors
+
+
+def _cleanup(staged: list[tuple[Path, Path]], backups: list[tuple[Path, Path]]) -> None:
+    """Best-effort removal of any temporary files left behind."""
+    for temp, _target in staged:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for backup, _target in backups:
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":  # pragma: no cover

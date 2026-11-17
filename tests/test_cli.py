@@ -242,3 +242,136 @@ def test_scripted_pipeline_converts_to_valid_disabled_draft(tmp_path):
 
     report = json.loads((out / "migration-report.json").read_text())
     assert report["exit_code"] == 2
+
+
+# ---- safe staged writes with rollback (issue 4) --------------------------
+
+import os
+import uuid as _uuid
+
+from pipebridge.cli import _write_all
+from pipebridge.errors import PipebridgeError
+
+ITEMS_CONTENT = {"workflow.yml": "WF-V2", "migration-report.md": "MD-V2", "migration-report.json": "JS-V2"}
+PREVIOUS = {"workflow.yml": "PRECIOUS-WF-V1", "migration-report.md": "PRECIOUS-MD-V1"}
+
+
+def _make_items(out):
+    return [(out / name, content) for name, content in ITEMS_CONTENT.items()]
+
+
+def _assert_no_temp_files(out):
+    leftovers = [p.name for p in out.iterdir() if ".tmp" in p.name or ".bak" in p.name]
+    assert leftovers == [], f"temporary files not cleaned: {leftovers}"
+
+
+def test_write_all_rejects_targets_equal_to_input(tmp_path):
+    jf = tmp_path / "Jenkinsfile"
+    jf.write_text("pipeline {}")
+    with pytest.raises(PipebridgeError, match="input Jenkinsfile"):
+        _write_all([(jf, "EVIL")], protected=jf)
+
+
+def test_write_all_rejects_symlink_target_pointing_at_input(tmp_path):
+    jf = tmp_path / "Jenkinsfile"
+    jf.write_text("pipeline {}")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "workflow.yml").symlink_to(jf)
+    with pytest.raises(PipebridgeError, match="input Jenkinsfile"):
+        _write_all(_make_items(out), protected=jf)
+    assert jf.read_text() == "pipeline {}"
+
+
+def test_write_all_success_replaces_and_cleans_backups(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "unrelated.txt").write_text("keep me")
+    (out / "workflow.yml").write_text(PREVIOUS["workflow.yml"])
+    _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
+    assert (out / "workflow.yml").read_text() == "WF-V2"
+    assert (out / "migration-report.md").read_text() == "MD-V2"
+    assert (out / "unrelated.txt").read_text() == "keep me"
+    _assert_no_temp_files(out)
+
+
+def test_write_all_commit_failure_restores_previous_bytes(tmp_path, monkeypatch):
+    """A handled rename failure at any commit position must restore the
+    previous output set byte-for-byte, remove newly introduced outputs,
+    clean temp files, and leave unrelated files alone."""
+    out = tmp_path / "out"
+    for position in (1, 2, 3):
+        out.mkdir(exist_ok=True)
+        for name, content in PREVIOUS.items():
+            (out / name).write_text(content)
+        (out / "unrelated.txt").write_text("keep me")
+        (out / "migration-report.json").unlink(missing_ok=True)
+
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst, _pos=position, _real=real_replace):
+            calls["n"] += 1
+            if calls["n"] == _pos:
+                raise OSError(f"simulated failure at commit #{_pos}")
+            return _real(src, dst)
+
+        monkeypatch.setattr(os, "replace", flaky)
+        with pytest.raises(PipebridgeError):
+            _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
+        monkeypatch.undo()
+
+        assert (out / "workflow.yml").read_text() == PREVIOUS["workflow.yml"]
+        assert (out / "migration-report.md").read_text() == PREVIOUS["migration-report.md"]
+        assert not (out / "migration-report.json").exists()
+        assert (out / "unrelated.txt").read_text() == "keep me"
+        _assert_no_temp_files(out)
+
+
+def test_write_all_commit_failure_without_existing_outputs_leaves_nothing(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    for position in (1, 2, 3):
+        out.mkdir(exist_ok=True)
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst, _pos=position, _real=real_replace):
+            calls["n"] += 1
+            if calls["n"] == _pos:
+                raise OSError(f"simulated failure at commit #{_pos}")
+            return _real(src, dst)
+
+        monkeypatch.setattr(os, "replace", flaky)
+        with pytest.raises(PipebridgeError):
+            _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
+        monkeypatch.undo()
+
+        assert not any(out.iterdir()), "no artifacts may survive a failed run"
+
+
+def test_write_all_staging_failure_touches_nothing(tmp_path, monkeypatch):
+    """A failure while STAGING (before any commit) must leave existing
+    outputs byte-for-byte and create no partial files."""
+    out = tmp_path / "out"
+    out.mkdir()
+    for name, content in PREVIOUS.items():
+        (out / name).write_text(content)
+
+    real_write = __import__("pathlib").Path.write_text
+    calls = {"n": 0}
+
+    def flaky_write(self, data, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:  # second staged file fails
+            raise OSError("simulated staging failure")
+        return real_write(self, data, *a, **kw)
+
+    monkeypatch.setattr("pathlib.Path.write_text", flaky_write)
+    with pytest.raises(PipebridgeError):
+        _write_all(_make_items(out), protected=tmp_path / "Jenkinsfile")
+    monkeypatch.undo()
+
+    for name, content in PREVIOUS.items():
+        assert (out / name).read_text() == content
+    assert not (out / "migration-report.json").exists()
+    _assert_no_temp_files(out)
