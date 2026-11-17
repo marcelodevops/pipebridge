@@ -1,0 +1,30 @@
+// k8s-custom-agent: Kubernetes pod agent and scripted logic require manual migration.
+pipeline {
+    agent {
+        kubernetes {
+            defaultContainer 'jnlp'
+            yaml '''
+kind: Pod
+spec:
+  containers:
+  - name: kubectl
+    image: bitnami/kubectl:1.29
+    command:
+    - sleep
+    args:
+    - 99d
+'''
+        }
+    }
+    stages {
+        stage('Deploy') {
+            steps {
+                script {
+                    def nodes = sh(script: 'kubectl get nodes -o name', returnStatus: true)
+                    echo "Nodes seen: ${nodes}"
+                }
+                sh 'kubectl apply -f k8s/'
+            }
+        }
+    }
+}

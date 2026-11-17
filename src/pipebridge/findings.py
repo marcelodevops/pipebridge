@@ -27,6 +27,7 @@ PB_ENVVAL = "PB-ENVVAL"
 PB_SYNTAX = "PB-SYNTAX"
 PB_JENV = "PB-JENV"
 PB_GHEXPR = "PB-GHEXPR"
+PB_SHELLCHECK = "PB-SHELLCHECK"
 PB_ASSUME_RUNNER = "PB-ASSUME-RUNNER"
 PB_ASSUME_CHECKOUT = "PB-ASSUME-CHECKOUT"
 PB_ASSUME_SHELL = "PB-ASSUME-SHELL"
@@ -51,6 +52,7 @@ REGISTRY: dict[str, tuple[str, str]] = {
     PB_SYNTAX: (SEVERITY_BLOCKER, "Unknown or unsupported syntax"),
     PB_JENV: (SEVERITY_WARNING, "Jenkins-specific variable reference in shell text"),
     PB_GHEXPR: (SEVERITY_WARNING, "GitHub expression syntax in source literal"),
+    PB_SHELLCHECK: (SEVERITY_WARNING, "shellcheck note about the migrated shell script"),
     PB_ASSUME_RUNNER: (SEVERITY_INFO, "Runner assumed ubuntu-latest"),
     PB_ASSUME_CHECKOUT: (SEVERITY_INFO, "checkout scm assumed to run in the migrated repository"),
     PB_ASSUME_SHELL: (SEVERITY_INFO, "Shell and execution-environment differences"),

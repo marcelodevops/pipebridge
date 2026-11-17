@@ -16,7 +16,8 @@ from pathlib import Path
 
 from . import __version__
 from .analysis import analyze_source
-from .errors import PipebridgeError, ValidationError
+from .errors import PipebridgeError
+from .findings import Finding, PB_SHELLCHECK
 from .reporting import build_report, render_json_report, render_markdown_report
 from .validation import validate_generated_workflow
 from .workflow import generate_workflow
@@ -125,12 +126,7 @@ _OUTPUT_FILES = ("workflow.yml", "migration-report.md", "migration-report.json")
 def _cmd_convert(args) -> int:
     path, text = _read_source(args.jenkinsfile)
     analysis = analyze_source(text)
-    report = build_report(analysis, source_path=str(path), validation=None)
-
     workflow_text = generate_workflow(analysis, source_name=path.name)
-    markdown_text = render_markdown_report(report)
-    json_text = render_json_report(report)
-    contents = [workflow_text, markdown_text, json_text]
 
     output_dir = Path(args.output)
     if output_dir.exists() and not output_dir.is_dir():
@@ -149,14 +145,42 @@ def _cmd_convert(args) -> int:
     # deliberate `if: false` disabled state is disclosed as the single
     # suppressed lint rule.
     validation = validate_generated_workflow(
-        workflow_text, targets[0], disabled=bool(summary_blockers := report["summary"]["blockers"])
+        workflow_text,
+        targets[0],
+        disabled=bool(analysis.has_blockers),
     )
-    report["validation"] = validation
+
+    # shellcheck notes are about the user's faithfully-migrated script:
+    # surface them as warnings instead of failing the conversion.
+    notes = (validation.get("actionlint") or {}).get("shellcheck_notes") or []
+    for note in notes:
+        analysis.findings.append(
+            Finding(
+                code=PB_SHELLCHECK,
+                severity="warning",
+                construct="generated workflow script",
+                message=note,
+                line=0,
+                col=0,
+                suggestion=(
+                    "The script text was preserved verbatim from the source; fix the "
+                    "quoting in the Jenkinsfile (or the generated workflow) deliberately."
+                ),
+            )
+        )
+
+    report = build_report(analysis, source_path=str(path), validation=validation)
+    markdown_text = render_markdown_report(report)
     json_text = render_json_report(report)
-    contents[2] = json_text
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_all([(target, content) for target, content in zip(targets, contents)])
+    _write_all(
+        [
+            (targets[0], workflow_text),
+            (targets[1], markdown_text),
+            (targets[2], json_text),
+        ]
+    )
 
     summary = report["summary"]
     print(

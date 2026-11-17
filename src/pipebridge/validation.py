@@ -10,6 +10,7 @@ Validation has honest, separate levels that are reported distinctly:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -53,7 +54,7 @@ def run_actionlint(path, ignore: list[str] | None = None) -> dict:
             timeout=_ACTIONLINT_TIMEOUT_SECONDS,
             check=False,
         )
-        command = [executable, "-no-color"]
+        command = [executable, "-no-color", "-format", "{{json .}}"]
         for pattern in ignore or []:
             command.extend(["-ignore", pattern])
         command.append(str(path))
@@ -72,20 +73,63 @@ def run_actionlint(path, ignore: list[str] | None = None) -> dict:
             "output": f"actionlint could not be executed: {exc}",
         }
     version_first = version.stdout.strip().splitlines()[0] if version.stdout.strip() else "unknown"
-    ok = proc.returncode == 0
-    output = (proc.stdout + proc.stderr).strip()
     if proc.returncode not in (0, 1):
-        output = f"actionlint exited unexpectedly ({proc.returncode}): {output}"
+        output = (proc.stdout + proc.stderr).strip()
+        return {
+            "available": True,
+            "ok": None,
+            "exit_code": proc.returncode,
+            "output": f"actionlint exited unexpectedly ({proc.returncode}): {output}",
+            "version": version_first,
+        }
+    entries = _parse_actionlint_json(proc.stdout)
+    if entries is None:
+        # Unexpected output shape: report the raw text honestly rather than
+        # guessing at a classification.
+        output = (proc.stdout + proc.stderr).strip()
+        return {
+            "available": True,
+            "ok": proc.returncode == 0,
+            "exit_code": proc.returncode,
+            "output": output or "(no output)",
+            "version": version_first,
+        }
+    # Classify via the structured `kind` field: shellcheck notes are about
+    # the user's faithfully-migrated script (report warnings, not generation
+    # failures); every other kind is a structural workflow problem.
+    shellcheck = [e for e in entries if e.get("kind") == "shellcheck"]
+    structural = [e for e in entries if e.get("kind") != "shellcheck"]
+    ok = proc.returncode == 0 or (bool(shellcheck) and not structural)
     result = {
         "available": True,
         "ok": ok,
         "exit_code": proc.returncode,
-        "output": output,
+        "output": json.dumps(entries, ensure_ascii=False) if entries else "",
         "version": version_first,
+        "shellcheck_notes": [_fmt_actionlint_entry(e) for e in shellcheck] or None,
+        "structural_errors": [_fmt_actionlint_entry(e) for e in structural] or None,
     }
     if ignore:
         result["ignored_rules"] = list(ignore)
     return result
+
+
+def _parse_actionlint_json(text: str) -> list[dict] | None:
+    """Parse actionlint's `-format '{{json .}}'` output; None if unexpected."""
+    if not text.strip():
+        return []
+    try:
+        entries = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return entries if isinstance(entries, list) else None
+
+
+def _fmt_actionlint_entry(entry: dict) -> str:
+    location = entry.get("file", "")
+    if entry.get("line"):
+        location += f":{entry['line']}:{entry.get('column', 0)}"
+    return f"{location}: {entry.get('message', '')}".strip(": ")
 
 
 def validate_generated_workflow(workflow_text: str, workflow_path, disabled: bool = False) -> dict:

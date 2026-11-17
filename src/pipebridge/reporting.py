@@ -160,7 +160,7 @@ def render_markdown_report(report: dict) -> str:
             continue
         for f in group:
             lines.append(
-                f"### {f['code']} — {f['construct']} (line {f['line']}, col {f['col']})"
+                f"### {f['code']} — {f['construct']} {_finding_location(f)}"
             )
             lines.append("")
             lines.append(f"- {f['message']}")
@@ -185,6 +185,13 @@ def render_markdown_report(report: dict) -> str:
     )
     lines.append("")
     return "\n".join(lines)
+
+
+def _finding_location(f: dict) -> str:
+    """Findings at line 0 point into the generated workflow, not the source."""
+    if f["line"] == 0:
+        return "(generated workflow)"
+    return f"(line {f['line']}, col {f['col']})"
 
 
 def _fmt_yaml(v: dict) -> str:
