@@ -209,13 +209,23 @@ def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> 
 
     - Nothing is written until ALL artifacts are staged and the previous
       contents backed up; staging/backup failures leave every target
-      untouched.
+      untouched. Temporary and backup paths are registered BEFORE the
+      write/copy that creates them, so a failure that leaves partially
+      written bytes on disk is still cleaned up.
     - A handled (OSError) failure during the commit renames rolls back:
       previously existing files are restored byte-for-byte from backups,
       newly introduced outputs are removed, and all temporary files are
-      cleaned. Unrelated files are never touched. Rollback itself is
-      best-effort: if the rollback I/O also fails, that failure is
-      reported in the raised error.
+      cleaned. Unrelated files are never touched.
+    - Rollback attempts EVERY committed target even if one restoration
+      fails. A restoration that fails is reported as an INCOMPLETE
+      rollback: the backup is preserved (it holds the only surviving copy
+      of the original bytes) and the error names each affected target and
+      the exact backup path for manual recovery. A rollback with no such
+      failures is reported as complete. Backups are only ever removed
+      after the replacement was committed (success path) or restored
+      (consumed by the rollback rename) — or when the target itself still
+      holds the original bytes (never committed), making the backup a
+      redundant copy.
     - Temporary paths are unique per run (uuid-suffixed) so parallel or
       repeated runs cannot collide.
     - Any target that resolves to ``protected`` (the input Jenkinsfile) is
@@ -231,20 +241,27 @@ def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> 
     staged: list[tuple[Path, Path]] = []  # (temp, target)
     backups: list[tuple[Path, Path]] = []  # (backup, target), existing targets only
     committed: list[tuple[Path, Path | None]] = []  # (target, backup-or-None)
+    # Restorations that failed: (target, backup). The backup is the only
+    # surviving copy of the original bytes and must never be deleted.
+    unrestored: list[tuple[Path, Path]] = []
     try:
         # Phase 1: stage every artifact next to its target (same directory
-        # => same filesystem => the later rename is atomic).
+        # => same filesystem => the later rename is atomic). The temp path
+        # is registered BEFORE writing so a partial write that raises is
+        # still removed by cleanup.
         for target, content in items:
             temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-            temp.write_text(content, encoding="utf-8")
             staged.append((temp, target))
+            temp.write_text(content, encoding="utf-8")
 
-        # Phase 2: back up every pre-existing target byte-for-byte.
+        # Phase 2: back up every pre-existing target byte-for-byte. The
+        # backup path is registered BEFORE copying so a partial copy that
+        # raises is still removed by cleanup.
         for _temp, target in staged:
             if target.exists():
                 backup = target.with_name(f".{target.name}.{uuid.uuid4().hex}.bak")
-                shutil.copyfile(target, backup)
                 backups.append((backup, target))
+                shutil.copyfile(target, backup)
 
         # Phase 3: commit. On a handled failure, undo everything that was
         # committed so far.
@@ -253,18 +270,38 @@ def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> 
                 os.replace(temp, target)
                 committed.append((target, _backup_for(backups, target)))
         except OSError as exc:
-            rollback_errors = _rollback(committed)
-            message = f"failed writing generated files: {exc}; rolled back"
-            if rollback_errors:
-                message += " (rollback errors: " + "; ".join(rollback_errors) + ")"
-            raise PipebridgeError(message) from exc
+            unrestored, unremoved = _rollback(committed)
+            parts = [f"failed writing generated files: {exc}"]
+            if not unrestored and not unremoved:
+                parts.append("rolled back completely")
+            else:
+                parts.append(
+                    "ROLLBACK INCOMPLETE: rollback could not be completed "
+                    "for every target"
+                )
+                if unrestored:
+                    recovery = "; ".join(
+                        f"{target} -> recover previous contents from {backup}"
+                        for target, backup in unrestored
+                    )
+                    parts.append(
+                        "previous contents were NOT restored and are preserved "
+                        f"in recovery backups: {recovery}"
+                    )
+                if unremoved:
+                    parts.append(
+                        "newly written files could NOT be removed: "
+                        + ", ".join(str(t) for t in unremoved)
+                    )
+            raise PipebridgeError("; ".join(parts)) from exc
     except PipebridgeError:
-        _cleanup(staged, backups)
+        _cleanup(staged, backups, preserve_backups={b for _, b in unrestored})
         raise
     except OSError as exc:
         _cleanup(staged, backups)
         raise PipebridgeError(f"failed writing generated files: {exc}") from exc
-    # Success: consume the backups (they are no longer needed).
+    # Success: every replacement was committed; consume the backups (they
+    # are no longer needed).
     for backup, _target in backups:
         backup.unlink(missing_ok=True)
 
@@ -276,28 +313,51 @@ def _backup_for(backups: list[tuple[Path, Path]], target: Path) -> Path | None:
     return None
 
 
-def _rollback(committed: list[tuple[Path, Path | None]]) -> list[str]:
-    """Undo committed replacements, newest first; returns error messages."""
-    errors: list[str] = []
+def _rollback(
+    committed: list[tuple[Path, Path | None]],
+) -> tuple[list[tuple[Path, Path]], list[Path]]:
+    """Undo committed replacements, newest first.
+
+    Every committed target is attempted even if an earlier restoration
+    fails. Returns (unrestored, unremoved): restorations that failed —
+    their backups still hold the only surviving copy of the original
+    bytes — and newly-introduced targets that could not be removed.
+    """
+    unrestored: list[tuple[Path, Path]] = []
+    unremoved: list[Path] = []
     for target, backup in reversed(committed):
         try:
             if backup is not None:
                 os.replace(backup, target)  # byte-for-byte restore
             else:
                 target.unlink(missing_ok=True)  # newly introduced: remove
-        except OSError as exc:
-            errors.append(f"{target}: {exc}")
-    return errors
+        except OSError:
+            if backup is not None:
+                unrestored.append((target, backup))
+            else:
+                unremoved.append(target)
+    return unrestored, unremoved
 
 
-def _cleanup(staged: list[tuple[Path, Path]], backups: list[tuple[Path, Path]]) -> None:
-    """Best-effort removal of any temporary files left behind."""
+def _cleanup(
+    staged: list[tuple[Path, Path]],
+    backups: list[tuple[Path, Path]],
+    preserve_backups: frozenset[Path] | set[Path] = frozenset(),
+) -> None:
+    """Best-effort removal of temporary files left behind.
+
+    Backups in ``preserve_backups`` (restorations that failed) are NEVER
+    removed: they hold the only surviving copy of the user's original
+    data.
+    """
     for temp, _target in staged:
         try:
             temp.unlink(missing_ok=True)
         except OSError:
             pass
     for backup, _target in backups:
+        if backup in preserve_backups:
+            continue
         try:
             backup.unlink(missing_ok=True)
         except OSError:
