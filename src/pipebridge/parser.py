@@ -70,6 +70,24 @@ _DECLARATION_MODIFIERS = frozenset(
     {"public", "private", "protected", "static", "final"}
 )
 
+# Groovy keywords can never be an identifier segment of an import path. A
+# segment that is one of these makes the statement unsupported (a blocker),
+# never an info-level import. Kept deliberately broad: rejecting a valid
+# import is the safe direction, because a blocker only disables the draft.
+_IMPORT_KEYWORDS = frozenset(
+    {
+        "abstract", "as", "assert", "boolean", "break", "byte", "case",
+        "catch", "char", "class", "const", "continue", "def", "default",
+        "do", "double", "else", "enum", "extends", "false", "final",
+        "finally", "float", "for", "goto", "if", "implements", "import",
+        "in", "instanceof", "int", "interface", "long", "native", "new",
+        "null", "package", "private", "protected", "public", "return",
+        "short", "static", "strictfp", "super", "switch", "synchronized",
+        "this", "throw", "throws", "trait", "transient", "true", "try",
+        "var", "void", "volatile", "while",
+    }
+)
+
 
 class _Parser:
     def __init__(self, source: str) -> None:
@@ -98,6 +116,45 @@ class _Parser:
     def _skip_newlines(self) -> None:
         while self._peek().kind in (NEWLINE, SEMI):
             self._advance()
+
+    def _statement_preview(self, start_index: int) -> str:
+        """Render one statement's tokens for a finding message.
+
+        Reads ahead without consuming, stopping at the depth-0 newline or
+        semicolon that closes the statement (or at end of file). Punctuation
+        is attached to its neighbour so the preview resembles the source.
+        """
+        pieces: list[str] = []
+        depth = 0
+        idx = start_index
+        while idx < len(self._tokens):
+            tok = self._tokens[idx]
+            if tok.kind == EOF:
+                break
+            if depth == 0 and tok.kind in (NEWLINE, SEMI):
+                break
+            if tok.kind in (LPAREN, LBRACE, LBRACKET):
+                depth += 1
+            elif tok.kind in (RPAREN, RBRACE, RBRACKET):
+                depth = max(0, depth - 1)
+            pieces.append(tok.value)
+            idx += 1
+        text = ""
+        for piece in pieces:
+            if not text:
+                text = piece
+            elif piece == ".":
+                if text.rsplit(" ", 1)[-1] in ("import", "static"):
+                    text += " ."
+                else:
+                    text += "."
+            elif piece in {",", ":", ")", "]"}:
+                text += piece
+            elif piece in {"(", "["} or text.endswith((".", "(", "[")):
+                text += piece
+            else:
+                text += " " + piece
+        return text
 
     def _skip_balanced(self, open_kind: str, close_kind: str) -> None:
         """Consume from the current open token through its matching close."""
@@ -395,34 +452,50 @@ class _Parser:
     def _scan_import_statement(self, buffered: list[Finding]) -> tuple[bool, tuple[int, int] | None]:
         """Recognize one ``import`` statement (documented, limited grammar):
 
-        ``import [static] a.b.Class`` — a dotted identifier path, optionally
-        ending in the ``.*`` wildcard, terminated by a newline or semicolon.
-        ``as`` aliasing and any other form are NOT supported: the statement
-        is then reported as a PB-GROOVY-PRELUDE blocker.
+        ``import [static] a.b.Class`` — one or more dotted identifier
+        segments, optionally ending in the ``.*`` wildcard, terminated by a
+        newline, semicolon, or end of file. Every other form is executable
+        Groovy outside the grammar (``as`` aliasing, punctuation, misplaced
+        wildcards, repeated/missing dots, keyword segments, …) and is
+        reported as a PB-GROOVY-PRELUDE blocker, never as an info-level
+        import: an unsupported import must never leave the draft enabled.
         """
+        statement_start = self._pos
         start = self._advance()  # 'import'
-        parts: list[str] = []
-        supported = True
+        is_static = False
         if self._peek().kind == IDENT and self._peek().value == "static":
             self._advance()
-            parts.append("static")
-        if self._peek().kind != IDENT:
+            is_static = True
+        segments: list[str] = []
+        wildcard = False
+        supported = True
+        tok = self._peek()
+        if tok.kind != IDENT or tok.value in _IMPORT_KEYWORDS:
             supported = False
         else:
-            parts.append(self._advance().value)
+            segments.append(self._advance().value)
             while supported and self._peek().kind == DOT:
                 self._advance()
                 nxt = self._peek()
-                if nxt.kind in (IDENT, OTHER):
-                    parts.append(nxt.value)
+                if nxt.kind == IDENT and nxt.value not in _IMPORT_KEYWORDS:
+                    segments.append(self._advance().value)
+                elif (
+                    nxt.kind == OTHER
+                    and nxt.value == "*"
+                    and self._peek(1).kind in (NEWLINE, SEMI, EOF)
+                ):
+                    # The wildcard is allowed only as the final segment.
                     self._advance()
+                    wildcard = True
+                    break
                 else:
                     supported = False
-        path = ".".join(parts[1:]) if parts and parts[0] == "static" else ".".join(parts)
-        if parts and parts[0] == "static":
-            path = "static " + path
-        terminated = self._peek().kind in (NEWLINE, SEMI, EOF)
-        if supported and terminated:
+            if supported and self._peek().kind not in (NEWLINE, SEMI, EOF):
+                supported = False
+        if supported:
+            path = ".".join(segments + (["*"] if wildcard else []))
+            if is_static:
+                path = "static " + path
             buffered.append(
                 self._make(
                     PB_GROOVY_IMPORT,
@@ -440,14 +513,16 @@ class _Parser:
             return True, None
         # Recognized as an import statement, but outside the supported
         # grammar: executable surrounding Groovy → blocker, not info.
+        preview = self._statement_preview(statement_start)
         buffered.append(
             self._make(
                 PB_GROOVY_PRELUDE,
                 "unsupported import statement",
-                f"Import '{path}' uses syntax outside the supported form "
-                "('import [static] some.package.Class', optionally ending "
-                "in '.*'; 'as' aliasing is not supported). It was not "
-                "evaluated.",
+                f"Import statement '{preview}' uses syntax outside the "
+                "supported form ('import [static] some.package.Class', "
+                "optionally ending in '.*'; 'as' aliasing, punctuation, "
+                "repeated dots, and misplaced wildcards are not supported). "
+                "It was not evaluated.",
                 start.line,
                 start.col,
                 "Use the supported import form, or migrate the import "
