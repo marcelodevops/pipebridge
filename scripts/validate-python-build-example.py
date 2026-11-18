@@ -30,6 +30,7 @@ Jenkinsfile says" mechanism.
 from __future__ import annotations
 
 import argparse
+import atexit
 import copy
 import hashlib
 import json
@@ -85,8 +86,6 @@ def main() -> None:
     work = Path(tempfile.mkdtemp(prefix="pb-example-validation-"))
     print(f"work directory: {work}")
     if not args.keep:
-        import atexit
-
         atexit.register(shutil.rmtree, work, ignore_errors=True)
 
     example_dist = work / "example-dist"
