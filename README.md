@@ -342,6 +342,12 @@ The report is explicit about what was and was not read.
 
 AI-assisted migration advice, bulk repository scanning, Jenkins API integration, and automatic secret migration are future work. This increment is intentionally focused on a correct, honest core.
 
+## Shipped example
+
+[`examples/python-build/`](examples/python-build/) is a small declarative pipeline (checkout, then test, then build) that converts with no blockers. Its unmodified pipebridge output is in `examples/python-build/migration/`.
+
+GitHub Actions discovers workflows only in [`.github/workflows/`](.github/workflows/). The live test is [`.github/workflows/python-build-example.yml`](.github/workflows/python-build-example.yml): the generated workflow with `defaults.run.working-directory` set to `examples/python-build`. That adjustment, and why checkout still runs at the repository root, is documented in the example README.
+
 ## Development
 
 ```sh
