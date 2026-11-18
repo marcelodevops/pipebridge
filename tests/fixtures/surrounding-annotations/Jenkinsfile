@@ -1,0 +1,16 @@
+// surrounding-annotations: an annotation other than @Library before the
+// pipeline block is Groovy that pipebridge does not evaluate
+// (PB-GROOVY-PRELUDE blocker; disabled draft). @Library keeps its existing
+// PB-LIB classification.
+@Grab('org.apache.commons:commons-lang3:3.14')
+
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh 'make build'
+            }
+        }
+    }
+}

@@ -1,0 +1,27 @@
+// prelude-postlude-combined: Groovy on both sides of the pipeline block.
+// Imports are info-level; the declaration and the helper functions are
+// executable Groovy and block migration (PB-GROOVY-PRELUDE,
+// PB-GROOVY-POSTLUDE). The draft is disabled; stages are still listed.
+import groovy.json.JsonSlurper
+
+String target_env = 'staging'
+
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh 'make build'
+            }
+        }
+        stage('Deploy') {
+            steps {
+                sh "make deploy ENV=${target_env}"
+            }
+        }
+    }
+}
+
+def cleanupWorkspace() {
+    deleteDir()
+}

@@ -1,0 +1,22 @@
+// calls-to-helper: steps that call postlude helper functions or imported
+// symbols keep their existing unsupported-step blockers; the surrounding
+// Groovy never makes a call translatable. The import itself is info-level
+// (PB-GROOVY-IMPORT); the postlude function is a PB-GROOVY-POSTLUDE blocker.
+import hudson.model.Result
+
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                mavenBuild('jdk21', 'clean install')
+                Result.dump()
+                sh 'make build'
+            }
+        }
+    }
+}
+
+def mavenBuild(String jdk, String cmdline) {
+    sh "mvn -v ${cmdline}"
+}
