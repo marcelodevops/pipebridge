@@ -1,12 +1,12 @@
 # Release notes — pipebridge v0.1.0 (ALPHA)
 
-> **Status: alpha, release not yet published.** This document prepares
-> the forthcoming v0.1.0 release. Release assets (wheel and source
-> distribution) do not exist on the
-> [releases page](https://github.com/marcelodevops/pipebridge/releases)
-> yet; the download instructions below are the instructions for that
-> forthcoming release and must not be read as evidence that it is
-> already published. This release is **not** published to PyPI.
+> **Status: alpha prerelease, published 2026-11-18.** The release is
+> published at
+> <https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0>
+> (tag `v0.1.0` at commit `e97b8a0a6e4f9a14d74d527d03b35c811ba7f88b`),
+> marked **alpha (pre-release)** and deliberately **not** as latest
+> stable. The wheel, source distribution, and SHA256SUMS are attached
+> to the release. pipebridge is **not** published to PyPI.
 
 ## What v0.1.0 is
 
@@ -33,11 +33,11 @@ and exact commits):
   wheel installs and passes the CLI smoke matrix in a fresh environment
   outside the repository.
 
-## Installation (for the forthcoming v0.1.0 release)
+## Installation
 
 Requires Python 3.10 or newer (CI tests 3.10 and 3.13).
 
-### From the GitHub release wheel (once published)
+### From the GitHub release wheel
 
 ```sh
 pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
@@ -45,7 +45,7 @@ pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0
 pipx install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
 ```
 
-### From the source distribution (once published)
+### From the source distribution
 
 ```sh
 pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0.tar.gz
@@ -125,23 +125,28 @@ required structure (no `stages`, no steps) is malformed input (exit 1).
 
 ## Release checklist (for the release manager)
 
-Nothing below has been done for v0.1.0 yet.
+State for v0.1.0 (published 2026-11-18 from commit
+`e97b8a0a6e4f9a14d74d527d03b35c811ba7f88b`):
 
-- [ ] All CI checks green on `main` (tests on 3.10/3.13, lint + build +
-      smoke test, example validation) —
-      <https://github.com/marcelodevops/pipebridge/actions>
-- [ ] Full suite green locally with `actionlint` present:
-      `python -m pytest tests/ -q`
-- [ ] `docs/validation.md` evidence current (live run + expected-failure
+- [x] All CI checks green on the release commit (tests on 3.10/3.13,
+      lint + build + smoke test, example validation) —
+      <https://github.com/marcelodevops/pipebridge/actions/runs/44239883966>.
+      Note: this was the newest `main` commit with a green run; the
+      immediately following `main` commit (a merge of the intentional-
+      failure evidence branch, reverted afterwards) had a red example-
+      validation run, which is why the release tags the verified green
+      commit.
+- [x] Full suite green locally with `actionlint` present:
+      `python -m pytest tests/ -q` → 157 passed (actionlint 1.7.12)
+- [x] `docs/validation.md` evidence current (live run + expected-failure
       run links resolve, commits match)
-- [ ] Version stays `0.1.0` (`src/pipebridge/__init__.py`); do **not**
-      regenerate committed example output solely for version strings —
-      regenerate only when the conversion output itself changes, then
-      re-apply the live-workflow working-directory adjustment
-- [ ] Build: `python -m pip install build && python -m build --outdir dist .`
-- [ ] Metadata: `twine check dist/*` passes
-- [ ] Fresh-environment smoke test **outside the repository** (see the
-      validated commands in `docs/validation.md`):
+- [x] Version stayed `0.1.0` (`src/pipebridge/__init__.py`); committed
+      example output was **not** regenerated solely for version strings
+- [x] Build from the tagged commit into a fresh directory:
+      `python -m build --outdir dist .`
+- [x] Metadata: `twine check dist/*` passed (wheel and sdist)
+- [x] Fresh-environment smoke test **outside the repository**, from the
+      installed wheel:
       - `pipebridge --version` → `pipebridge 0.1.0`
       - `pipebridge analyze <supported fixture>` → exit 0
       - `pipebridge convert <supported fixture> --output out` → exit 0,
@@ -150,11 +155,11 @@ Nothing below has been done for v0.1.0 yet.
         draft disabled (`if: false`)
       - `pipebridge convert <malformed fixture> --output out` → exit 1,
         no generated artifacts
-- [ ] Tag `v0.1.0` on `main`; create the GitHub release titled
-      `v0.1.0 — alpha`, marked as a **pre-release**, with this document
-      as the body
-- [ ] Upload `dist/pipebridge-0.1.0-py3-none-any.whl` and
-      `dist/pipebridge-0.1.0.tar.gz` as release assets
-- [ ] Verify the release-download URL resolves after publishing, and
-      only then update the README's "not yet published" note
+- [x] Tag `v0.1.0` at the verified commit; GitHub release titled
+      `v0.1.0 — alpha`, marked **pre-release**, **not** latest
+- [x] Uploaded `pipebridge-0.1.0-py3-none-any.whl` and
+      `pipebridge-0.1.0.tar.gz`, plus a `SHA256SUMS` file
+- [x] Verified the asset checksums against the uploaded `SHA256SUMS`
+      and installed the wheel from the actual release-download URL;
+      updated the README's "not yet published" note afterwards
 - [ ] Out of scope for v0.1.0: publishing to PyPI
