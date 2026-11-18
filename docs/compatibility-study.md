@@ -256,8 +256,11 @@ evaluated.**
   trailing function (blocker; structure extracted); prelude+postlude
   combined; genuinely scripted file still `PB-SCRIPT`; comment/shebang-only
   file unchanged (no new findings); a call to a postlude function from a step
-  still blocks; **the generated draft is disabled in every Groovy-surrounding
-  fixture**; golden outputs for each fixture; all existing 157 tests pass
+  still blocks; **every fixture with surrounding executable Groovy
+  (declarations/functions) produces a disabled draft (`if: false`) and exit 2,
+  while imports-only prelude fixtures follow their separate classification
+  rule (info-level import finding; no blocker from the imports themselves)**;
+  golden outputs for each fixture; all existing 157 tests pass
   unchanged.
 - **Acceptance criteria:**
   1. For the five affected sample files' **synthetic equivalents** in
