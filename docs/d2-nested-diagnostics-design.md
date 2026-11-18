@@ -1,11 +1,10 @@
 # D2 design — diagnostic traversal inside blocked scopes
 
-> **Status: implemented, pending CI confirmation.** Diagnostic traversal is
-> in the parser. It does not expand translation eligibility, bump the version,
-> or alter any published release asset. Scope is defect **D2** from
+> **Status: implemented.** Diagnostic traversal is in the parser. It does
+> not expand translation eligibility, bump the version, or alter any published
+> release asset. Scope is defect **D2** from
 > [`docs/compatibility-study.md`](compatibility-study.md) §2. Acceptance is
-> `tests/test_diagnostics.py`; this status is confirmed when that suite is
-> green on the implementation PR's CI.
+> `tests/test_diagnostics.py`, confirmed green on the implementation PR CI.
 
 ## Problem
 
