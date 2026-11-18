@@ -190,9 +190,12 @@ def test_terraform_approval_conversion(tmp_path):
 
     report = json.loads((out / "migration-report.json").read_text())
     blockers = {f["code"] for f in report["findings"] if f["severity"] == "blocker"}
-    # The input gate blocks the whole Deploy stage: its steps (including the
-    # interpolated echo) are never traversed, so PB-INPUT is the only blocker.
-    assert blockers == {"PB-INPUT"}
+    # The input gate blocks the Deploy stage. Its steps are not translated,
+    # but the interpolated echo is still diagnosed.
+    assert blockers == {"PB-INPUT", "PB-INTERP"}
+    interp = next(f for f in report["findings"] if f["code"] == "PB-INTERP")
+    assert "BUILD_NUMBER" in interp["message"]
+    assert "stage 'Deploy'" in interp["message"]
     by_code = {f["code"]: f for f in report["findings"]}
     assert (by_code["PB-INPUT"]["line"], by_code["PB-INPUT"]["col"]) == (20, 13)
     jenv = next(f for f in report["findings"] if f["code"] == "PB-JENV")

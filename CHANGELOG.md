@@ -7,8 +7,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 Diagnostic traversal inside blocked scopes (defect D2). Findings in those
-scopes are a migration checklist, not translated behavior. Exit codes,
-disabled drafts, and the supported subset are unchanged. No version bump.
+scopes are a migration checklist, not translated behavior. `sh`, `echo`,
+and `checkout` arguments are validated there too: interpolation, dynamic
+expressions, and unsupported checkout forms are reported, not translated.
+Exit codes, disabled drafts, and the supported subset are unchanged. No
+version bump.
 
 ## [0.2.0] — Alpha (2026-11-18)
 

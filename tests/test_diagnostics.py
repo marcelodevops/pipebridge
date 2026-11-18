@@ -357,6 +357,158 @@ def test_withcredentials_and_wrap_bodies_are_not_entered():
     assert result.pipeline.stages[0].steps == []
 
 
+def _pos(source: str, needle: str) -> tuple[int, int]:
+    index = source.index(needle)
+    line = source[:index].count("\n") + 1
+    col = index - source.rfind("\n", 0, index)
+    return line, col
+
+
+def _argument_source(prefix: str) -> str:
+    return prefix + """
+                script {
+                    sh "echo ${env.DO_NOT_REPORT}"
+                    checkout([$class: 'GitSCM'])
+                }
+                sh 'make'
+                echo 'plain'
+                checkout scm
+                sh "echo ${env.BUILD_NUMBER}"
+                echo "build ${env.BUILD_NUMBER}"
+                echo env.JOB_NAME
+                sh "echo " + env.BUILD_NUMBER
+                checkout([$class: 'GitSCM'])
+                mavenBuild 'later'
+            }
+        }
+    }
+}
+"""
+
+
+PIPELINE_ARGUMENT_SOURCE = _argument_source("""pipeline {
+    agent none
+    stages {
+        stage('Hidden') {
+            steps {""")
+
+
+STAGE_ARGUMENT_SOURCE = _argument_source("""pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {""")
+
+
+def _assert_argument_diagnostics(result, source: str, stage_name: str) -> None:
+    text = "\n".join(f.message + f.construct for f in result.findings)
+    assert "DO_NOT_REPORT" not in text
+    # The map form is unsupported, but its class name is not extracted.
+    assert not any("GitSCM" in (f.message + f.construct) for f in result.findings)
+
+    literal_lines = {
+        _pos(source, "sh 'make'")[0],
+        _pos(source, "echo 'plain'")[0],
+        _pos(source, "checkout scm")[0],
+    }
+    assert not any(f.line in literal_lines for f in result.findings)
+
+    sh_interp = _pos(source, "${env.BUILD_NUMBER}")
+    echo_at = source.index("${env.BUILD_NUMBER}", source.index("${env.BUILD_NUMBER}") + 1)
+    echo_interp = (
+        source[:echo_at].count("\n") + 1,
+        echo_at - source.rfind("\n", 0, echo_at),
+    )
+
+    interps = [f for f in result.findings if f.code == "PB-INTERP"]
+    interp_pos = {(f.line, f.col) for f in interps}
+    assert sh_interp in interp_pos
+    assert echo_interp in interp_pos
+    concat_at = source.index('+ env.BUILD_NUMBER')
+    concat_pos = (
+        source[:concat_at].count("\n") + 1,
+        concat_at - source.rfind("\n", 0, concat_at),
+    )
+    assert concat_pos in interp_pos
+    assert all(f"stage '{stage_name}'" in f.message for f in interps)
+    assert any("${env.BUILD_NUMBER}" in f.message for f in interps)
+    assert any("dynamic Groovy expression" in f.message for f in interps)
+
+    checkout_at = source.rindex("checkout([")
+    line_start = source.rfind("\n", 0, checkout_at) + 1
+    checkout_pos = (
+        source[:checkout_at].count("\n") + 1,
+        source.index("(", checkout_at) - line_start + 1,
+    )
+    checkouts = [
+        f for f in result.findings
+        if f.code == "PB-SYNTAX" and f.construct == "checkout step"
+    ]
+    assert len(checkouts) == 1
+    assert (checkouts[0].line, checkouts[0].col) == checkout_pos
+    assert "checkout scm" in checkouts[0].message
+    assert f"stage '{stage_name}'" in checkouts[0].message
+
+    dynamic = [
+        f for f in result.findings
+        if f.construct == "echo step" and "requires a string" in f.message
+    ]
+    assert len(dynamic) == 1
+    assert (dynamic[0].line, dynamic[0].col) == _pos(source, "env.JOB_NAME")
+
+    sibling = [f for f in result.findings if f.construct == "step 'mavenBuild'"]
+    assert len(sibling) == 1
+    assert sibling[0].line > checkouts[0].line
+    assert all(stage.steps == [] for stage in result.pipeline.stages)
+    keys = [(f.code, f.line, f.col) for f in result.findings]
+    assert len(keys) == len(set(keys))
+    assert [(f.line, f.col, f.code) for f in result.findings] == sorted(
+        (f.line, f.col, f.code) for f in result.findings
+    )
+
+
+def test_pipeline_blocked_scope_validates_step_arguments():
+    result = parse(PIPELINE_ARGUMENT_SOURCE)
+    assert result.pipeline.blocked is True
+    _assert_argument_diagnostics(result, PIPELINE_ARGUMENT_SOURCE, "Hidden")
+    assert blocker_codes(result).count("PB-SCRIPT") == 1
+    assert blocker_codes(result).count("PB-AGENT") == 1
+
+
+def test_stage_blocked_scope_validates_step_arguments_and_later_sibling():
+    result = parse(STAGE_ARGUMENT_SOURCE)
+    assert result.pipeline.blocked is False
+    assert result.pipeline.stages[0].blocked is True
+    _assert_argument_diagnostics(result, STAGE_ARGUMENT_SOURCE, "Build")
+    assert blocker_codes(result).count("PB-SCRIPT") == 1
+    assert "PB-AGENT" not in blocker_codes(result)
+
+
+def test_eligible_literal_steps_are_not_false_blockers():
+    source = """pipeline {
+    agent any
+    stages {
+        stage('A') {
+            steps {
+                sh 'make'
+                echo 'plain'
+                sh "make all"
+                checkout scm
+            }
+        }
+    }
+}
+"""
+    result = parse(source)
+    assert blocker_codes(result) == []
+    assert [step.kind for step in result.pipeline.stages[0].steps] == [
+        "sh",
+        "echo",
+        "sh",
+        "checkout",
+    ]
+
+
 def test_when_expression_and_agent_internals_are_opaque():
     source = """pipeline {
     agent none

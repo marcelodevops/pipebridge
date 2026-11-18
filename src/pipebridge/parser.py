@@ -277,12 +277,13 @@ class _Parser:
         self._finding_keys.add(key)
         self._findings.append(self._make(code, construct, message, line, col, suggestion))
 
-    def _decode_step_string(self, tok, context: str) -> Decoded | None:
+    def _decode_step_string(self, tok, context: str, *, scoped: bool = False) -> Decoded | None:
         """Decode a string token used in a step; None when interpolated."""
         decoded = decode_string(tok.value, tok.kind, tok.line, tok.col)
         if decoded.has_interpolation:
             interp = decoded.interpolations[0]
-            self._add(
+            add = self._add_scoped if scoped else self._add
+            add(
                 PB_INTERP,
                 f"Groovy interpolated string in {context}",
                 f"Groovy would substitute '{interp.text}' at pipeline runtime; "
@@ -2044,18 +2045,125 @@ class _Parser:
         finally:
             self._diag_depth -= 1
 
+    def _diagnose_supported_step(self, name: str) -> None:
+        """Validate a supported step's arguments without translating it."""
+        if name == "sh":
+            self._diagnose_sh_arguments()
+        elif name == "echo":
+            self._diagnose_echo_arguments()
+        else:
+            self._diagnose_checkout_arguments()
+
+    def _diagnose_sh_arguments(self) -> None:
+        tok = self._peek()
+        if tok.kind == LPAREN:
+            self._advance()
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind in STRING_KINDS:
+                self._advance()
+                self._decode_step_string(tok, "sh", scoped=True)
+                self._note_dynamic_continuation("sh")
+                if self._peek().kind == RPAREN:
+                    self._advance()
+                else:
+                    self._add_scoped(
+                        PB_SYNTAX,
+                        "sh step",
+                        "Expected ')' after the sh script string.",
+                        self._peek().line,
+                        self._peek().col,
+                        "Use sh('command').",
+                    )
+                    self._skip_remaining_arguments()
+                return
+            self._add_scoped(
+                PB_SYNTAX,
+                "sh step",
+                "sh with named arguments (label:, script:) is not supported by "
+                "the MVP; the enclosing stage was not translated.",
+                tok.line,
+                tok.col,
+                "Use sh '<command>' and set the environment explicitly if needed.",
+            )
+            self._skip_remaining_arguments()
+            return
+        if tok.kind in STRING_KINDS:
+            self._advance()
+            self._decode_step_string(tok, "sh", scoped=True)
+            self._note_dynamic_continuation("sh")
+            return
+        self._add_scoped(
+            PB_SYNTAX,
+            "sh step",
+            "sh requires a string argument in the supported subset.",
+            tok.line,
+            tok.col,
+            "Use sh '<command>'.",
+        )
+        self._consume_dynamic_argument()
+
+    def _diagnose_echo_arguments(self) -> None:
+        tok = self._peek()
+        if tok.kind in STRING_KINDS:
+            self._advance()
+            self._decode_step_string(tok, "echo", scoped=True)
+            self._note_dynamic_continuation("echo")
+            return
+        self._add_scoped(
+            PB_SYNTAX,
+            "echo step",
+            "echo requires a string argument in the supported subset.",
+            tok.line,
+            tok.col,
+            "Use echo '<message>'.",
+        )
+        self._consume_dynamic_argument()
+
+    def _diagnose_checkout_arguments(self) -> None:
+        tok = self._peek()
+        if tok.kind == IDENT and tok.value == "scm":
+            self._advance()
+            return
+        self._add_scoped(
+            PB_SYNTAX,
+            "checkout step",
+            "Only 'checkout scm' is supported by the MVP; the enclosing stage "
+            "was not translated.",
+            tok.line,
+            tok.col,
+            "Use 'checkout scm' or configure actions/checkout deliberately.",
+        )
+        self._consume_dynamic_argument()
+
+    def _note_dynamic_continuation(self, context: str) -> None:
+        """A literal followed by an operator is still a dynamic expression."""
+        tok = self._peek()
+        if tok.kind in (NEWLINE, SEMI, RBRACE, RPAREN, EOF) or tok.kind == IDENT:
+            return
+        self._add_scoped(
+            PB_INTERP,
+            f"Groovy dynamic expression in {context}",
+            "The step argument continues as a dynamic Groovy expression; "
+            "it was not evaluated or translated.",
+            tok.line,
+            tok.col,
+            "Use a literal string, or compute the value in a workflow step deliberately.",
+        )
+        self._skip_statement()
+
+    def _consume_dynamic_argument(self) -> None:
+        """Consume one non-literal argument without interpreting it."""
+        if self._peek().kind == LPAREN:
+            self._skip_step_tail()
+            return
+        self._skip_statement()
+
     def _diagnose_step(self, stage_name: str, name: str, tok) -> None:
         if name in ("sh", "echo", "checkout"):
-            # Supported steps are not reported and are never translated from a
-            # blocked scope; consume their arguments/body without recording.
-            if (
-                name == "checkout"
-                and self._peek().kind == IDENT
-                and self._peek().value == "scm"
-            ):
-                self._advance()
-                return
-            self._skip_step_tail()
+            # The name is in the supported subset, but the argument form may
+            # not be. Validate it and never record a Step.
+            self._diagnose_supported_step(name)
             return
         if name == "script":
             self._add_scoped(
