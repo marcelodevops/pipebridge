@@ -539,6 +539,7 @@ class _Parser:
                     tok.col,
                 )
             start = tok
+            construct = self._postlude_construct()
             terminated, shape = self._skip_surrounding_statement()
             if shape is not None:
                 raise MalformedPipelineError(
@@ -547,7 +548,6 @@ class _Parser:
                     shape[0],
                     shape[1],
                 )
-            construct = self._postlude_construct()
             if terminated:
                 message = (
                     "This Groovy content after the pipeline block is "

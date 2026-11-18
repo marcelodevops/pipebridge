@@ -150,6 +150,8 @@ def test_trailing_helper_functions_block_and_structure_is_extracted():
     postludes = [f for f in result.findings if f.code == "PB-GROOVY-POSTLUDE"]
     assert len(postludes) == 2
     assert all(f.severity == "blocker" for f in postludes)
+    assert "function definition" in postludes[0].construct
+    assert "function definition" in postludes[1].construct
     assert (postludes[0].line, postludes[0].col) == (12, 1)
     assert (postludes[1].line, postludes[1].col) == (16, 1)
 
