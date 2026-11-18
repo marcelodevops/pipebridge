@@ -51,6 +51,13 @@ from .model import EnvVar, ParseResult, Pipeline, Span, Stage, Step
 
 STRING_KINDS = (STRING_SQ, STRING_DQ, STRING_TS, STRING_TD)
 
+# Bounded diagnostic traversal: step wrappers whose closure is a steps list,
+# not opaque Groovy. Only these are entered during diagnosis.
+_WRAPPER_STEPS = frozenset(
+    {"timeout", "retry", "catchError", "dir", "withEnv", "wrap", "withCredentials"}
+)
+_MAX_DIAGNOSTIC_DEPTH = 20
+
 # Keywords that begin a Groovy statement but can never name a type. A prelude
 # statement starting with one of these is arbitrary Groovy (a script), not a
 # recognized declaration.
@@ -94,6 +101,12 @@ class _Parser:
         self._tokens = tokenize(source)
         self._pos = 0
         self._findings: list[Finding] = []
+        # Dedupe key for findings: the same construct at the same position is
+        # reported once, even when translation and diagnosis both reach it.
+        self._finding_keys: set[tuple[str, int, int]] = set()
+        # Parent-scope labels for diagnostic findings (outermost first).
+        self._scope: list[str] = []
+        self._diag_depth = 0
         self.pipeline: Pipeline | None = None
         # Required-structure bookkeeping: which stages parsed a steps
         # section, and which of those sections were non-empty.
@@ -244,6 +257,10 @@ class _Parser:
         )
 
     def _add(self, code: str, construct: str, message: str, line: int, col: int, suggestion: str) -> None:
+        key = (code, line, col)
+        if key in self._finding_keys:
+            return
+        self._finding_keys.add(key)
         self._findings.append(self._make(code, construct, message, line, col, suggestion))
 
     def _decode_step_string(self, tok, context: str) -> Decoded | None:
@@ -291,6 +308,9 @@ class _Parser:
             # draft becomes a named skeleton (stages extracted and listed,
             # no steps translated) and is disabled like any other blocker.
             self._mark_pipeline_blocked()
+        # Source order keeps reports and diffs reviewable. The sort is stable,
+        # so findings emitted at the same position keep their emission order.
+        self._findings.sort(key=lambda f: (f.line, f.col))
         return ParseResult(pipeline=self.pipeline, findings=self._findings)
 
     # ---- surrounding Groovy --------------------------------------------
