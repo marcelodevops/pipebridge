@@ -4,12 +4,13 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] — Alpha (unreleased)
+## [0.1.0] — Alpha (2026-11-18)
 
 First milestone: a proven, repeatable, installable MVP of the
 Jenkins-to-GitHub-Actions migration CLI. **Alpha** — the conversion
 subset is deliberately small and everything outside it is reported,
-never approximated.
+never approximated. Published as a GitHub pre-release:
+<https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0>
 
 ### Added
 

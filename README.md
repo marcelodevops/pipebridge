@@ -18,19 +18,15 @@ Requires Python 3.10+ (CI tests 3.10 and 3.13).
 
 ### From a GitHub release wheel
 
-> The v0.1.0 alpha release is being prepared — its assets are **not
-> published yet**. When it appears on the
-> [releases page](https://github.com/marcelodevops/pipebridge/releases),
-> install with:
->
-> ```sh
-> pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
-> # or, for an isolated CLI:
-> pipx install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
-> ```
->
-> Until then, install from a clone (below). pipebridge is not published
-> to PyPI.
+The [v0.1.0 alpha release](https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0) is published (prerelease):
+
+```sh
+pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
+# or, for an isolated CLI:
+pipx install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
+```
+
+The attached `SHA256SUMS` file lets you verify the download. pipebridge is not published to PyPI.
 
 ### From source
 
@@ -366,7 +362,7 @@ The live workflow has been dispatched for real: a successful run and an intentio
 
 ## Changelog and releases
 
-Notable changes are documented in [`CHANGELOG.md`](CHANGELOG.md); the forthcoming v0.1.0 alpha release notes, installation options, and the release checklist are in [`docs/release-notes-v0.1.0.md`](docs/release-notes-v0.1.0.md).
+Notable changes are documented in [`CHANGELOG.md`](CHANGELOG.md). The **v0.1.0 alpha** release is published at <https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0>; its release notes (installation options, supported versions, conversion subset, known limitations) are in [`docs/release-notes-v0.1.0.md`](docs/release-notes-v0.1.0.md).
 
 ## Development
 
