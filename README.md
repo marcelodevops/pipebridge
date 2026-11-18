@@ -14,19 +14,33 @@ pipebridge translates a deliberately limited, clearly documented subset of Jenki
 
 ## Installation
 
-Requires Python 3.10+.
+Requires Python 3.10+ (CI tests 3.10 and 3.13).
+
+### From a GitHub release wheel
+
+> The v0.1.0 alpha release is being prepared — its assets are **not
+> published yet**. When it appears on the
+> [releases page](https://github.com/marcelodevops/pipebridge/releases),
+> install with:
+>
+> ```sh
+> pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
+> # or, for an isolated CLI:
+> pipx install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
+> ```
+>
+> Until then, install from a clone (below). pipebridge is not published
+> to PyPI.
+
+### From source
 
 ```sh
-git clone https://github.com/OWNER/pipebridge.git
+git clone https://github.com/marcelodevops/pipebridge.git
 cd pipebridge
 python3 -m venv .venv
 source .venv/bin/activate
 pip install .
 ```
-
-For an isolated CLI install, `pipx install /path/to/pipebridge` also works.
-
-> pipebridge is not yet published to PyPI; install from a clone for now.
 
 Verify:
 
@@ -347,6 +361,12 @@ AI-assisted migration advice, bulk repository scanning, Jenkins API integration,
 [`examples/python-build/`](examples/python-build/) is a small declarative pipeline (checkout, then test, then build) that converts with no blockers. Its unmodified pipebridge output is in `examples/python-build/migration/`.
 
 GitHub Actions discovers workflows only in [`.github/workflows/`](.github/workflows/). The live test is [`.github/workflows/python-build-example.yml`](.github/workflows/python-build-example.yml): the generated workflow with `defaults.run.working-directory` set to `examples/python-build`. That adjustment, and why checkout still runs at the repository root, is documented in the example README.
+
+The live workflow has been dispatched for real: a successful run and an intentional-failure run (failure propagation) are recorded with exact commits in [`docs/validation.md`](docs/validation.md). CI repeats the example validation on every change — unittest, example wheel/sdist build, `greet()` smoke test from the wheel, conversion with the installed package, byte-for-byte workflow comparison, structural live-workflow comparison, and field-wise report validation. We have executed the migrated workflow on GitHub Actions; we have **not** compared it against a live Jenkins run, and no runtime equivalence is claimed.
+
+## Changelog and releases
+
+Notable changes are documented in [`CHANGELOG.md`](CHANGELOG.md); the forthcoming v0.1.0 alpha release notes, installation options, and the release checklist are in [`docs/release-notes-v0.1.0.md`](docs/release-notes-v0.1.0.md).
 
 ## Development
 
