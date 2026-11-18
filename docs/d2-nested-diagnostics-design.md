@@ -16,8 +16,11 @@ pipebridge stops walking a scope as soon as translation becomes ineligible:
 
 That is correct for **translation** — nothing inside a blocked scope is safe to
 emit — but it also stops **diagnosis**. The `findings` list is the user's
-migration checklist, so it under-reports the work. No bytes of output are
-wrong: the draft is already disabled with `if: false`.
+migration checklist, so it under-reports the work. The output is not
+semantically wrong: the draft is already disabled with `if: false`. Adding
+findings can legitimately change the diagnostic comment and blocker-code text
+in that disabled workflow, which is why this design compares blocked workflows
+structurally rather than byte-for-byte.
 
 ### Current vs proposed findings (Jetty-like synthetic)
 
@@ -55,8 +58,12 @@ the `PB-PARALLEL` message, so a nested stage with no unsupported constructs is
 still visible.
 
 What must not change: `translated` still lists only the top-level `Parallel
-Stage` with no steps, `workflow.yml` stays byte-identical, exit stays 2, and
-the draft stays disabled.
+Stage` with no steps, the draft stays disabled with `if: false`, and exit stays
+2. The workflow's **parsed YAML** stays equal — same jobs, steps, triggers,
+permissions, runner, and disabled condition. Only diagnostic text may differ:
+the `#` comments and the blocker-code list embedded in the `[NOT MIGRATED]`
+placeholder step grow with the findings. Byte equality is *not* required for
+blocked inputs, because that text is derived from the blocker set.
 
 ## 1. Traversal boundaries and diagnostic grammar
 
@@ -72,11 +79,24 @@ The diagnostic traversal is entered **only** at the two existing stop points:
 
 1. `_parse_stage` when `pipeline.blocked` is already true (body would be
    brace-skipped today), and
-2. the remainder of a stage body after a stage-level blocker (today
-   `_skip_rest_of_block()`), plus the same remainder inside nested scopes.
+2. a stage-level blocker (today the code calls `_skip_rest_of_block()`), plus
+   the same condition inside nested scopes.
 
-It is never run on files that already translate cleanly, so pure-declarative
-output is unaffected by construction.
+At each stop point the traversal covers **both the triggering construct's
+eligible body and the remaining siblings** in the enclosing scope. A
+stage-level `parallel` blocker must therefore still descend into its branch
+`stage` blocks before diagnosing the sections that follow `parallel`; nested
+`stages`, `matrix.stages`, and allowlisted step-wrapper bodies are entered the
+same way. The construct that produced the blocker is not reported twice — the
+`(code, line, col)` suppression below applies inside its body.
+
+Opaque bodies are still never entered, even when they belong to the triggering
+construct: `script`, shared-library content, agent internals, `when`
+expressions, `post` closures, and unknown/non-allowlisted step closures stop
+analysis as listed below.
+
+It is never run on files that already translate cleanly, so clean output is
+unaffected by construction.
 
 ### Structural descent (recognized declarative grammar)
 
@@ -161,66 +181,98 @@ drafts, no Groovy evaluation, no shared-library analysis, no change to the
 
 Contract:
 
-1. Jetty-like fixture: exit **2**; `if: false` present; `translated` still
-   `["Parallel Stage"]` with zero steps; `workflow.yml` byte-identical to the
-   pre-change output; findings include the ten additions in the table above,
-   with correct `line`/`col` and parent scope.
-2. Supported pure-declarative fixtures (`python-gpu-kymatio-like`,
-   `node-minimal-do400-like`): workflow goldens byte-identical, findings and
-   exit 0 unchanged.
-3. Ordinary (not pipeline-blocked) file with a stage-level `parallel`: stage
-   list and workflow unchanged; new branch constructs reported; `PB-PARALLEL`
-   emitted once; exit 2.
-4. Nested `stages`, `matrix`, `options`, `tools`, `input`, `when`, `post`,
+1. **Jetty-like fixture:** exit **2**; `if: false` present; `translated` still
+   `["Parallel Stage"]` with zero steps; findings include the ten additions in
+   the table above, with correct `line`/`col` and parent scope.
+   `workflow.yml` must be **structurally equal** to the pre-change output
+   after parsing both documents: identical `jobs` graph, step count/names/
+   order, `runs-on`, `on`/triggers, `permissions`, and `if: false`. The only
+   permitted differences are diagnostic text — `#` comments and the
+   blocker-code list inside the `[NOT MIGRATED]` placeholder step's `run`
+   string. A comparison helper applies exactly that normalization (replace the
+   parenthesized `PB-…` list in that placeholder) and asserts the rest of the
+   parsed document is equal. Raw byte equality is not asserted for blocked
+   inputs.
+2. **Clean build-and-test example** (`tests/fixtures/build-and-test`): exit
+   **0** and `workflow.yml` **byte-identical**. No diagnostic traversal runs
+   on a clean translation, so this fixture is the byte-level guarantee that
+   supported output is untouched; it also guards triggers, permissions, and
+   steps in the enabled path.
+3. **Already-blocked synthetic fixtures** `python-gpu-kymatio-like` (3
+   blockers) and `node-minimal-do400-like` (1 blocker) both **exit 2 today and
+   must keep exit 2**. Their disabled drafts stay disabled, `translated`
+   entries keep their stage lists, and parsed YAML equality (with the same
+   diagnostic-text normalization) holds. Newly diagnosed findings inside their
+   blocked scopes are expected; a change to exit 0 or to an enabled draft is a
+   failure.
+4. **Triggering-construct body:** an isolated ordinary file (not
+   pipeline-blocked) with a stage-level `parallel` must report the branch
+   agents, conditions, steps, and nested stages, not just the `parallel`
+   finding. `PB-PARALLEL` appears exactly once; sections after `parallel` are
+   still diagnosed; stage list and parsed YAML stay unchanged; exit 2.
+5. Nested `stages`, `matrix`, `options`, `tools`, `input`, `when`, `post`,
    stage agents and unsupported steps each produce one finding per construct
    with the correct scope; `(code, line, col)` is unique across the report.
-5. `script` and shared-library bodies are never traversed: a fixture with
-   DSL-looking text inside `script { }` produces no findings for that text.
-6. Malformed/unterminated braces and unknown section syntax: no crash, no
+6. `script` and shared-library bodies are never traversed: a fixture with
+   DSL-looking text inside `script { }` produces no findings for that text,
+   including when the `script` is inside a triggering `parallel` branch.
+7. Malformed/unterminated braces and unknown section syntax: no crash, no
    duplicate `PB-SYNTAX`, analysis-stopped text present, existing exit code
    preserved.
-7. D1 behavior unchanged: prelude/postlude findings, imports-only info
+8. D1 behavior unchanged: prelude/postlude findings, imports-only info
    findings, and genuinely scripted `PB-SCRIPT` classification.
-8. Exit-code matrix unchanged: 0 / 1 / 2 exactly as documented in README.
-9. Finding object keys are exactly the current set (schema guard test);
-   `translated[]` entries still have `stage`, `source_line`, `blocked`,
-   `steps`.
-10. Full suite green on Python 3.10 and 3.13; `actionlint` 1.7.12 clean on
+9. Exit-code matrix unchanged: 0 / 1 / 2 exactly as documented in README, and
+   specifically no blocked fixture moves from 2 to 0.
+10. Finding object keys are exactly the current set (schema guard test);
+    `translated[]` entries still have `stage`, `source_line`, `blocked`,
+    `steps`.
+11. Full suite green on Python 3.10 and 3.13; `actionlint` 1.7.12 clean on
     generated workflows; documented example validation passes.
 
 Test files: extend `tests/test_surrounding_groovy.py` (synthetic matrix,
-stage lists, new expected codes), add `tests/test_diagnostics.py` (grammar,
-dedupe, stopping points, schema and no-step guarantees), and add fixtures under
-`tests/fixtures/` for the isolated parallel/matrix/nested cases. Store the
-pre-change Jetty `workflow.yml`/report as goldens before touching the parser.
+stage lists, preserved baseline exit codes), add `tests/test_diagnostics.py`
+(grammar, trigger-body traversal, dedupe, stopping points, schema and no-step
+guarantees), and add fixtures under `tests/fixtures/` for the isolated
+parallel/matrix/nested cases. Use PyYAML `safe_load` for the structural
+workflow comparison and keep the clean fixture's byte golden. Store the
+pre-change Jetty report and normalized YAML as baselines before touching the
+parser.
 
 ## 4. Risks and bounded implementation sequence
 
 | Risk | Mitigation |
 |------|------------|
-| Diagnostic traversal accidentally enables translation | No step sink in diagnostic mode; assert `Stage.steps` empty; workflow goldens byte-identical |
-| Duplicate findings (translation + diagnostics) | `(code, line, col)` seen-set; suppression of the triggering construct; uniqueness test |
+| Diagnostic traversal accidentally enables translation | No step sink in diagnostic mode; assert `Stage.steps` empty; parsed-YAML equality on blocked fixtures and byte equality on the clean build-and-test example |
+| Only siblings are diagnosed; the blocking construct's body is skipped | Explicit trigger-body rule; isolated stage-level `parallel` test asserts branch findings plus `PB-PARALLEL` exactly once |
+| Duplicate findings (translation + diagnostics) | `(code, line, col)` seen-set; suppression of the triggering construct inside its body; uniqueness test |
 | Mis-scoping through braces in strings/comments or unterminated blocks | Traverse lexer tokens, never raw text; reuse balanced skipping; fixture matrix incl. brace-bearing strings |
 | Arbitrary Groovy read as declarative DSL | Closed grammar table; explicit stop list; never enter `script`, shared-library, `node`, unknown step closures |
 | Over-claiming completeness | Message text names every stopping point; docs call diagnostics best-effort within the grammar |
 | Deep/large inputs | One token pass; diagnostics only on already-blocked paths; depth cap 20 with explicit truncation finding |
-| Consumer surprise from more findings | No schema/key change; ordering preserved; changelog and README note the added checklist entries; snapshot tests updated deliberately |
+| Consumer surprise from more findings | No schema/key change; ordering preserved; exit 2 preserved for blocked inputs; changelog and README note the added checklist entries; snapshot tests updated deliberately |
+| Diagnostic-text comparison drift | One shared normalization helper strips only `#` comments and the placeholder blocker-code list; jobs, steps, triggers, permissions, runner, and `if: false` compare exactly |
 
 Bounded sequence (each step is a reviewable commit/PR, none merges or
 releases):
 
-1. **Baseline** — capture Jetty `workflow.yml` and report; add the
+1. **Baseline** — capture the clean build-and-test byte golden and the
+   pre-change Jetty/Kymatio/DO400 reports plus normalized parsed YAML; add the
    `(code, line, col)` dedupe and source-order guarantee as no-op behavior.
-2. **Eligibility split** — introduce the read-only traversal mode and wire the
-   two existing skip sites to it. No new findings yet; all goldens identical.
-3. **Nested stages** — parent-scope stack, `parallel`/nested-`stages` branch
-   enumeration, branch names in messages.
+2. **Eligibility split** — introduce the read-only traversal mode and wire both
+   skip sites to it, including the triggering construct's eligible body. No
+   new findings yet: clean fixture byte-identical, blocked fixtures
+   parsed-YAML equal, baseline exit codes preserved.
+3. **Nested stages** — parent-scope stack, `parallel`/nested-`stages`/
+   `matrix.stages` branch enumeration from inside the triggering construct,
+   branch names in messages.
 4. **Sections and steps** — `agent`, `when`, `options`, `tools`, `input`,
    `matrix`, environment values, wrapper allowlist, unsupported-step reporting.
 5. **Hardening and contract** — stopping-point messages, depth cap, schema and
-   exit-code guards, fixture matrix, README/compatibility-study updates.
+   exit-code guards, the YAML comparison helper, fixture matrix,
+   README/compatibility-study updates.
 6. **Verification** — full suite on 3.10/3.13, actionlint, example validation;
-   report exact command output. No version bump, tag, release, or asset change.
+   confirm Kymatio/DO400 still exit 2 and build-and-test still exits 0; report
+   exact command output. No version bump, tag, release, or asset change.
 
 Expected size: roughly 250–400 lines of parser code plus tests, no new
 dependencies, no new finding codes, and no report schema change.
