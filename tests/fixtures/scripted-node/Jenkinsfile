@@ -1,0 +1,8 @@
+// scripted-node: a genuinely scripted pipeline (no declarative `pipeline {}`
+// block). Classification is unchanged: exactly one PB-SCRIPT blocker and no
+// extracted structure.
+node {
+    checkout scm
+    sh 'make build'
+    echo 'done'
+}

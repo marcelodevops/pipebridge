@@ -14,6 +14,16 @@ FIXTURES = {
     "container-credentials": 2,
     "terraform-approval": 2,
     "k8s-custom-agent": 2,
+    # Surrounding Groovy (v0.2.0): imports-only prelude is info-level and
+    # does not block; every executable surrounding form blocks.
+    "prelude-imports-only": 0,
+    "prelude-decl-literal": 2,
+    "prelude-decl-side-effect": 2,
+    "postlude-functions": 2,
+    "prelude-postlude-combined": 2,
+    "surrounding-annotations": 2,
+    "calls-to-helper": 2,
+    "scripted-node": 2,
 }
 
 

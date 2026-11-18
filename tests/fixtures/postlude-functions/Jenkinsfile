@@ -1,0 +1,27 @@
+// postlude-functions: helper function definitions after the pipeline block
+// are executable Groovy (PB-GROOVY-PRELUDE/POSTLUDE blockers). The pipeline
+// block itself is parsed: its stages are extracted and listed, and calls to
+// the helpers from steps remain unsupported and reported separately.
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh 'make build'
+            }
+        }
+        stage('Report') {
+            steps {
+                notifyStakeholders()
+            }
+        }
+    }
+}
+
+def notifyStakeholders() {
+    mail to: 'team@example.org', subject: "build ${env.BUILD_NUMBER}"
+}
+
+def printBanner(String text) {
+    echo "banner { with braces } ${text}"
+}

@@ -1,0 +1,21 @@
+// prelude-decl-side-effect: the initializer calls a method, so the
+// declaration computes a value at Jenkins runtime before the pipeline starts.
+// pipebridge does not evaluate it: PB-GROOVY-PRELUDE blocker, disabled draft.
+// The stages are still extracted and listed for manual migration.
+String build_id = org.apache.commons.lang.RandomStringUtils.random(4, false, true)
+
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh 'make build'
+            }
+        }
+        stage('Publish') {
+            steps {
+                sh 'make publish'
+            }
+        }
+    }
+}

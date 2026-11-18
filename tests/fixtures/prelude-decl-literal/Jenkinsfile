@@ -1,0 +1,22 @@
+// prelude-decl-literal: a variable declaration with a plain literal
+// initializer is still executable Groovy. pipebridge never decides that an
+// initializer is harmless, so this is a PB-GROOVY-PRELUDE blocker and the
+// generated draft stays disabled. The declarative block's stages are still
+// extracted and listed for manual migration.
+String release_tag = 'v1.2.3'
+
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh 'make build'
+            }
+        }
+        stage('Test') {
+            steps {
+                sh 'make test'
+            }
+        }
+    }
+}
