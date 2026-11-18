@@ -4,7 +4,7 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] — Alpha (2026-11-18, release preparation)
+## [0.2.0] — Alpha (2026-11-18)
 
 **Bounded analysis improvement, not broader conversion support.** The
 declarative `pipeline { }` block is now recognized and analyzed when it
@@ -15,6 +15,9 @@ Jenkins-to-GitHub runtime equivalence is claimed or tested. This addresses
 defect **D1** (surrounding Groovy discarded or truncated the analysis) from
 the v0.1.0 compatibility study. Defect **D2** (nested constructs are not
 enumerated once a pipeline-level blocker exists) remains deferred.
+
+Published as an alpha prerelease:
+<https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.0>.
 
 ### Added
 

@@ -206,7 +206,7 @@ disabled exactly as today. Info-level findings are reserved for explicitly
 supported forms whose omission is demonstrably harmless. **Groovy is never
 evaluated.**
 
-> **Implementation status (v0.2.0, release preparation).** The bounded D1
+> **Implementation status (v0.2.0, published alpha prerelease).** The bounded D1
 > fix described in this section is implemented: the declarative block is
 > analyzed when surrounded by the limited Groovy forms above, every
 > surrounding executable form is a blocker (disabled draft, exit 2), and

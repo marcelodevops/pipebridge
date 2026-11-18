@@ -18,12 +18,12 @@ Requires Python 3.10+ (CI tests 3.10 and 3.13).
 
 ### From a GitHub release wheel
 
-The [v0.1.0 alpha release](https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0) is published (prerelease):
+The [v0.2.0 alpha release](https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.0) is the newest published release (prerelease):
 
 ```sh
-pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
+pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.2.0/pipebridge-0.2.0-py3-none-any.whl
 # or, for an isolated CLI:
-pipx install https://github.com/marcelodevops/pipebridge/releases/download/v0.1.0/pipebridge-0.1.0-py3-none-any.whl
+pipx install https://github.com/marcelodevops/pipebridge/releases/download/v0.2.0/pipebridge-0.2.0-py3-none-any.whl
 ```
 
 The attached `SHA256SUMS` file lets you verify the download. pipebridge is not published to PyPI.
@@ -42,8 +42,7 @@ Verify:
 
 ```sh
 pipebridge --version
-# pipebridge 0.1.0 from the published v0.1.0 wheel
-# pipebridge 0.2.0 from this release-preparation source branch
+# pipebridge 0.2.0
 ```
 
 ## CLI
@@ -375,7 +374,7 @@ The live workflow has been dispatched for real: a successful run and an intentio
 
 ## Changelog and releases
 
-Notable changes are documented in [`CHANGELOG.md`](CHANGELOG.md). The **v0.1.0 alpha** release is published at <https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0>; its release notes (installation options, supported versions, conversion subset, known limitations) are in [`docs/release-notes-v0.1.0.md`](docs/release-notes-v0.1.0.md). **v0.2.0** (a bounded analysis improvement for surrounding Groovy) is prepared for release; its notes are in [`docs/release-notes-v0.2.0.md`](docs/release-notes-v0.2.0.md). It is **not yet published**: no tag or release asset exists for it yet.
+Notable changes are documented in [`CHANGELOG.md`](CHANGELOG.md). The **v0.1.0 alpha** release is published at <https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0>; its release notes are in [`docs/release-notes-v0.1.0.md`](docs/release-notes-v0.1.0.md). The **v0.2.0 alpha** release (a bounded analysis improvement for surrounding Groovy) is published as a prerelease at <https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.0>; its notes are in [`docs/release-notes-v0.2.0.md`](docs/release-notes-v0.2.0.md), and independent verification of the published artifacts is in [`docs/release-verification-v0.2.0.md`](docs/release-verification-v0.2.0.md).
 
 ## Development
 
