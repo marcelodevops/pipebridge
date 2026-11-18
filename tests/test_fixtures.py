@@ -24,6 +24,8 @@ FIXTURES = {
     "surrounding-annotations": 2,
     "calls-to-helper": 2,
     "scripted-node": 2,
+    # A malformed import must block: it must never be info-level.
+    "malformed-import": 2,
 }
 
 

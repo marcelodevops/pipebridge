@@ -1,0 +1,22 @@
+// malformed-import: a wildcard may only be the final import segment. This
+// statement is outside the documented limited grammar, so it must be a
+// PB-GROOVY-PRELUDE blocker (never an info-level PB-GROOVY-IMPORT): the
+// generated draft stays disabled even though the declarative structure is
+// still extracted and listed for manual migration.
+import foo.*.Bar
+
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh 'make build'
+            }
+        }
+        stage('Test') {
+            steps {
+                sh 'make test'
+            }
+        }
+    }
+}

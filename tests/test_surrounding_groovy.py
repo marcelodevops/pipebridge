@@ -68,6 +68,69 @@ def test_wildcard_and_static_import_forms_are_supported():
     assert len([f for f in result.findings if f.code == "PB-GROOVY-IMPORT"]) == 3
 
 
+def test_valid_import_forms_keep_info_severity_and_positions():
+    source = (
+        "import a.b.C\n"
+        "import static a.b.C.*\n"
+        "import a.b.*\n"
+        "import a.b.C;\n" + PIPELINE
+    )
+    result = parse(source)
+    assert blocker_codes(result) == []
+    imports = [f for f in result.findings if f.code == "PB-GROOVY-IMPORT"]
+    assert len(imports) == 4
+    assert [(f.line, f.col) for f in imports] == [(1, 1), (2, 1), (3, 1), (4, 1)]
+    assert all(f.severity == "info" for f in imports)
+    assert "static a.b.C.*" in imports[1].message
+    # Structure and step positions are unaffected by valid imports.
+    assert [s.name for s in result.pipeline.stages] == ["A"]
+    assert (result.pipeline.stages[0].steps[0].span.line, result.pipeline.stages[0].steps[0].span.col) == (10, 17)
+
+
+MALFORMED_IMPORTS = [
+    # Punctuation where an identifier segment belongs.
+    "import foo.+",
+    "import foo.@",
+    "import foo.@Bar",
+    # Wildcards that are not the final segment.
+    "import foo.*.Bar",
+    "import foo.*.*",
+    "import *",
+    # Missing and repeated segments.
+    "import foo.",
+    "import foo..Bar",
+    "import .foo",
+    "import;",
+    "import",
+    "import static",
+    "import static .foo",
+    # Aliases and trailing syntax.
+    "import foo.bar as baz",
+    "import foo.bar, baz",
+    "import foo.bar(baz)",
+    # Keywords can never be identifier segments.
+    "import foo.static",
+    "import static static",
+    "import static static.foo",
+    # A numeric token is not an identifier segment.
+    "import foo.1bar",
+]
+
+
+@pytest.mark.parametrize("statement", MALFORMED_IMPORTS)
+def test_malformed_imports_are_blocked_not_info(statement):
+    result = parse(statement + "\n" + PIPELINE)
+    assert result.pipeline is not None  # structure still extracted
+    assert [s.name for s in result.pipeline.stages] == ["A"]
+    # Never an enabled draft: exactly one prelude blocker, no info import.
+    assert blocker_codes(result) == ["PB-GROOVY-PRELUDE"]
+    assert "PB-GROOVY-IMPORT" not in codes(result)
+    finding = result.findings[0]
+    assert (finding.line, finding.col) == (1, 1)
+    assert "unsupported import statement" in finding.construct.lower()
+    assert "not evaluated" in finding.message
+
+
 def test_import_as_aliasing_is_not_supported_and_blocks():
     source = "import a.b.C as Foo\n" + PIPELINE
     result = parse(source)
@@ -420,6 +483,7 @@ EXECUTABLE_GROOVY_FIXTURES = [
     "surrounding-annotations",
     "calls-to-helper",
     "scripted-node",
+    "malformed-import",
 ]
 
 
