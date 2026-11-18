@@ -94,7 +94,7 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 
 | Jenkins construct | Status | Notes |
 | --- | --- | --- |
-| One declarative `pipeline { }` block | ✅ Supported | Scripted pipelines are rejected with a blocker (nothing inside them is extracted) |
+| One declarative `pipeline { }` block | ✅ Supported | Groovy **around** the block is recognized and reported (see rows below) but never evaluated or translated; genuinely scripted pipelines are still rejected with `PB-SCRIPT` |
 | `agent any` | ⚠️ With assumption | Target runner assumed `ubuntu-latest`; Jenkins `agent any` does **not** establish OS, installed tools, or network access (`PB-ASSUME-RUNNER`) |
 | `agent none`, `label`, `node`, `docker`, `dockerfile`, `kubernetes` | ❌ Blocked | `PB-AGENT` |
 | Sequential `stages` / `stage` / `steps` | ✅ Supported | Kept as sequential steps in **one** job so the filesystem (workspace) state is preserved between stages (`PB-SINGLE-JOB`) |
@@ -115,8 +115,14 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 | `tools` | ❌ Blocked | `PB-TOOLS` |
 | `when`, `parameters`, `triggers`, `input`, `post`, `options` | ❌ Blocked | `PB-WHEN`, `PB-PARAM`, `PB-TRIGGER`, `PB-INPUT`, `PB-POST`, `PB-SYNTAX` |
 | Unknown or arbitrary Groovy syntax | ❌ Blocked | `PB-SYNTAX` |
+| Groovy `import` before the block: `import [static] a.b.Class`, optionally ending `.*` | ⚠️ Recognized, info-level | `PB-GROOVY-IMPORT` — imports execute nothing and are never evaluated; references to imported symbols inside steps stay blocked. `as` aliasing or any other form is blocked (`PB-GROOVY-PRELUDE`) |
+| Variable declarations before the block (`def x`, `String x = …`, any initializer) | ❌ Blocked | `PB-GROOVY-PRELUDE` — executable Groovy, never evaluated, never judged harmless (even an unused variable can have a side-effecting initializer); the declarative block is still extracted and listed |
+| Annotations before the block other than `@Library` | ❌ Blocked | `PB-GROOVY-PRELUDE` — `@Library` keeps its existing `PB-LIB` classification |
+| Helper function definitions or other statements after the block | ❌ Blocked | `PB-GROOVY-POSTLUDE` — executable Groovy, skipped without evaluation; the declarative block is still extracted and listed, and calls to the helpers from steps stay blocked |
 
 Unsupported blocks are **not traversed**: a `script { }` or `withCredentials { … }` body is never mined for `sh`/`echo` commands as though its enclosing behavior didn't exist.
+
+Groovy **surrounding** the pipeline block is likewise never evaluated or translated: only its statement boundaries are recognized (enough to report it precisely and still parse the pipeline block). Surrounding executable Groovy is a pipeline-level blocker, so the generated draft remains a disabled skeleton that lists the extracted stages; a draft never appears fully migrated while surrounding Groovy is unmodeled.
 
 ## Generated workflow behavior
 
@@ -183,6 +189,9 @@ Every report contains:
 | `PB-ASSUME-CHECKOUT` | info | Source checkout: implicit default checkout modeled for translated pipelines, and/or explicit `checkout scm` → `actions/checkout` in the migrated repository |
 | `PB-ASSUME-SHELL` | info | Shell and execution-environment differences |
 | `PB-TRIGGER-MANUAL` | info | Workflow triggers `workflow_dispatch` only |
+| `PB-GROOVY-IMPORT` | info | Ordinary Groovy import statement before the pipeline block (limited grammar; never evaluated) |
+| `PB-GROOVY-PRELUDE` | blocker | Executable Groovy before the pipeline block (declarations, annotations, unsupported import forms) |
+| `PB-GROOVY-POSTLUDE` | blocker | Executable Groovy after the pipeline block (helper functions, other statements) |
 | `PB-SINGLE-JOB` | info | All stages kept in one job to preserve workspace state |
 
 ## Example migration
@@ -337,6 +346,9 @@ The report is explicit about what was and was not read.
 ## Known limitations
 
 - The supported subset is deliberately small; anything outside it is reported, never approximated.
+- Surrounding Groovy is recognized only within a deliberately limited grammar (ordinary imports, annotations, variable declarations, function definitions). It is **never evaluated or translated**, and this is not complete Groovy parsing: an unrecognized statement before the block still classifies the whole file as `PB-SCRIPT`, and multiple or ambiguous `pipeline` occurrences are rejected rather than resolved.
+- Nested constructs inside blocked pipelines are not enumerated (a `parallel` block inside a pipeline that already has a pipeline-level blocker produces no additional findings); the disabled draft and the report say what was and was not analyzed.
+- No Jenkins runtime equivalence is claimed or tested: values computed by surrounding Groovy at Jenkins runtime are not carried into any generated workflow.
 - One workflow, one job, `workflow_dispatch` only. No push/PR triggers in the MVP.
 - Groovy is supported only as far as literal string forms; any dynamic expression is a blocker.
 - Credentials, parameters, triggers, conditions, approvals, and post actions are never migrated — they require human decisions.
