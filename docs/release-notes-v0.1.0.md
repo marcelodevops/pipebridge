@@ -20,7 +20,7 @@ for blocked pipelines are disabled drafts.
 Validated for this milestone (see `docs/validation.md` for run links
 and exact commits):
 
-- 157-charge test suite (unit + end-to-end) passing on Python 3.10 and
+- 157-test suite (unit + end-to-end) passing on Python 3.10 and
   3.13 in CI, with actionlint 1.7.12 present and honestly skipped when
   absent.
 - The python-build example's migrated workflow executed live on

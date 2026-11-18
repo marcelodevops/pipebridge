@@ -65,17 +65,7 @@ def require(condition: bool, message: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--pipebridge",
-        default="pipebridge",
-        help="pipebridge CLI used for conversion (default: 'pipebridge' on PATH)",
-    )
-    parser.add_argument(
-        "--work-dir",
-        type=Path,
-        default=None,
-        help="work directory for builds and venvs (default: a fresh temp dir)",
-    )
+    parser.add_argument("--pipebridge", default="pipebridge", help="pipebridge CLI used for conversion (default: 'pipebridge' on PATH)")
     parser.add_argument("--keep", action="store_true", help="keep the work directory")
     args = parser.parse_args()
 
@@ -83,6 +73,8 @@ def main() -> None:
     require(pipebridge is not None, f"pipebridge CLI not found: {args.pipebridge!r}")
     print(f"pipebridge CLI: {pipebridge}")
 
+    # A fresh, unique temporary work directory per run; --keep preserves
+    # it (e.g. for inspecting built wheels afterwards).
     work = Path(tempfile.mkdtemp(prefix="pb-example-validation-"))
     print(f"work directory: {work}")
     if not args.keep:
