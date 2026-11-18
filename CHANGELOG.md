@@ -4,6 +4,61 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — Alpha (2026-11-18, release preparation)
+
+**Bounded analysis improvement, not broader conversion support.** The
+declarative `pipeline { }` block is now recognized and analyzed when it
+is surrounded by ordinary Groovy. Nothing about the supported translation
+subset changed: Groovy is never evaluated or translated, every surrounding
+executable form still produces a blocker (exit 2, disabled draft), and no
+Jenkins-to-GitHub runtime equivalence is claimed or tested. This addresses
+defect **D1** (surrounding Groovy discarded or truncated the analysis) from
+the v0.1.0 compatibility study. Defect **D2** (nested constructs are not
+enumerated once a pipeline-level blocker exists) remains deferred.
+
+### Added
+
+- Surrounding-Groovy recognition before and after one top-level
+  declarative `pipeline` block:
+  - Ordinary imports (`import [static] a.b.Class`, optionally ending in
+    `.*`) are info-level `PB-GROOVY-IMPORT` findings and do not block.
+  - Variable declarations and other annotations before the block are
+    executable Groovy and block as `PB-GROOVY-PRELUDE`; initializers are
+    never judged harmless and their values are never carried over.
+  - Helper function definitions and other statements after the block block
+    as `PB-GROOVY-POSTLUDE`.
+  - The declarative structure is still extracted and every top-level stage
+    is listed in the disabled draft and report. Pure-declarative output is
+    unchanged apart from the tool-version header line.
+- `docs/release-notes-v0.2.0.md`: scope, verification, installation, and
+  known limitations for this release-preparation increment.
+- A CLI fixture and test matrix for malformed imports.
+
+### Fixed
+
+- Import validation now enforces the documented limited grammar: dotted
+  identifier segments, an optional wildcard only as the final segment, and
+  correct ordinary/static structure. Malformed forms (punctuation such as
+  `import foo.+`, `import foo.@`, misplaced wildcards such as
+  `import foo.*.Bar`, aliases, repeated/missing segments, keyword segments)
+  are `PB-GROOVY-PRELUDE` blockers and can never leave the draft enabled.
+- Imports no longer classify as info just because their path tokens were
+  arbitrary punctuation.
+
+### Known limitations
+
+- **D2 remains deferred:** when a pipeline-level blocker exists, nested
+  constructs inside the pipeline (for example a `parallel` block and its
+  branches) are not enumerated as additional findings. The disabled draft
+  and report still state what was and was not analyzed.
+- Surrounding Groovy is recognized only for the limited statement forms
+  above. Unrecognized statements before the block still classify the file
+  as `PB-SCRIPT`; multiple or ambiguous `pipeline` occurrences are rejected
+  as malformed (exit 1, no artifacts).
+- No Groovy is evaluated, no initializer is classified as safe, and no
+  Jenkins runtime behavior is reproduced. See the README limitations and
+  the v0.2.0 release notes.
+
 ## [0.1.0] — Alpha (2026-11-18)
 
 First milestone: a proven, repeatable, installable MVP of the
@@ -70,3 +125,4 @@ never approximated. Published as a GitHub pre-release:
   manual restoration.
 
 [0.1.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0
+[0.2.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.0

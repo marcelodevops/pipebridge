@@ -206,6 +206,16 @@ disabled exactly as today. Info-level findings are reserved for explicitly
 supported forms whose omission is demonstrably harmless. **Groovy is never
 evaluated.**
 
+> **Implementation status (v0.2.0, release preparation).** The bounded D1
+> fix described in this section is implemented: the declarative block is
+> analyzed when surrounded by the limited Groovy forms above, every
+> surrounding executable form is a blocker (disabled draft, exit 2), and
+> ordinary imports are info-level under a strict grammar. This is an
+> analysis improvement only — no new construct is translated and no Groovy
+> is evaluated. **D2 remains deferred:** nested constructs are still not
+> enumerated once a pipeline-level blocker exists. No broader conversion
+> support or Jenkins runtime equivalence is claimed.
+
 - **Value:** today 4 of 7 sample files lose all structure (wholesale
   `PB-SCRIPT`, empty stage list) and the fifth (jetty) is parsed correctly
   and then truncated by its postlude (`PB-SYNTAX` at the trailing functions).
