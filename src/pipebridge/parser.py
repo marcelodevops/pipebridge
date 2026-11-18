@@ -13,20 +13,32 @@ Design rules:
 - A pipeline-level blocker (custom agent, parameters, …) stops step
   translation for the whole pipeline: the draft workflow becomes a
   reviewable skeleton.
+- Groovy **around** a top-level declarative pipeline block is recognized
+  within a documented, limited grammar (imports, variable declarations,
+  annotations, function definitions) so the block's structure can still be
+  extracted for analysis. The surrounding Groovy is never evaluated and
+  never translated: imports are reported at info level, every other
+  surrounding form is a blocker, and the draft stays disabled. Content
+  outside the recognized grammar keeps the scripted classification.
 """
 
 from __future__ import annotations
 
 from .errors import MalformedPipelineError
-from .findings import Finding, REGISTRY, PB_AGENT, PB_CRED, PB_ENVVAL, PB_INPUT, PB_INTERP, PB_LIB, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
+from .findings import Finding, REGISTRY, PB_AGENT, PB_CRED, PB_ENVVAL, PB_GROOVY_IMPORT, PB_GROOVY_POSTLUDE, PB_GROOVY_PRELUDE, PB_INPUT, PB_INTERP, PB_LIB, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
 from .groovystrings import Decoded, decode_string
 from .lexer import (
+    ANNOTATION,
+    DOT,
     EOF,
     IDENT,
     LBRACE,
+    LBRACKET,
     LPAREN,
     NEWLINE,
+    OTHER,
     RBRACE,
+    RBRACKET,
     RPAREN,
     SEMI,
     STRING_DQ,
@@ -38,6 +50,25 @@ from .lexer import (
 from .model import EnvVar, ParseResult, Pipeline, Span, Stage, Step
 
 STRING_KINDS = (STRING_SQ, STRING_DQ, STRING_TS, STRING_TD)
+
+# Keywords that begin a Groovy statement but can never name a type. A prelude
+# statement starting with one of these is arbitrary Groovy (a script), not a
+# recognized declaration.
+_RESERVED_STATEMENT_KEYWORDS = frozenset(
+    {
+        "as", "assert", "break", "case", "catch", "class", "continue", "def",
+        "default", "do", "else", "enum", "extends", "false", "finally", "for",
+        "if", "implements", "import", "in", "interface", "new", "null",
+        "package", "pipeline", "return", "super", "switch", "this", "throw",
+        "throws", "true", "try", "void", "while",
+    }
+)
+
+# Declaration modifiers accepted (limited grammar) before a variable
+# declaration or function definition in the surrounding Groovy.
+_DECLARATION_MODIFIERS = frozenset(
+    {"public", "private", "protected", "static", "final"}
+)
 
 
 class _Parser:
@@ -143,19 +174,20 @@ class _Parser:
 
     # ---- findings ------------------------------------------------------
 
-    def _add(self, code: str, construct: str, message: str, line: int, col: int, suggestion: str) -> None:
+    def _make(self, code: str, construct: str, message: str, line: int, col: int, suggestion: str) -> Finding:
         severity, _ = REGISTRY[code]
-        self._findings.append(
-            Finding(
-                code=code,
-                severity=severity,
-                construct=construct,
-                message=message,
-                line=line,
-                col=col,
-                suggestion=suggestion,
-            )
+        return Finding(
+            code=code,
+            severity=severity,
+            construct=construct,
+            message=message,
+            line=line,
+            col=col,
+            suggestion=suggestion,
         )
+
+    def _add(self, code: str, construct: str, message: str, line: int, col: int, suggestion: str) -> None:
+        self._findings.append(self._make(code, construct, message, line, col, suggestion))
 
     def _decode_step_string(self, tok, context: str) -> Decoded | None:
         """Decode a string token used in a step; None when interpolated."""
@@ -178,59 +210,382 @@ class _Parser:
     # ---- entry point ---------------------------------------------------
 
     def parse(self) -> ParseResult:
-        self._skip_newlines()
+        buffered = self._scan_prelude()
+        if buffered is None:
+            # Scripted pipeline (or arbitrary Groovy): classification
+            # unchanged from previous releases. self._findings carries
+            # exactly the one PB-SCRIPT blocker; no pipeline was parsed.
+            return ParseResult(pipeline=self.pipeline, findings=self._findings)
 
-        if self._peek().kind == EOF and not self._findings:
+        self._parse_pipeline()
+        if self.pipeline is not None:
+            self._validate_required_structure()
+        postlude = self._scan_postlude()
+
+        # Commit the surrounding-Groovy findings only now that the scan has
+        # terminated at a parsed top-level pipeline block.
+        self._findings.extend(buffered)
+        self._findings.extend(postlude)
+        if any(
+            f.code in (PB_GROOVY_PRELUDE, PB_GROOVY_POSTLUDE)
+            for f in self._findings
+        ):
+            # Executable surrounding Groovy is a pipeline-level blocker: the
+            # draft becomes a named skeleton (stages extracted and listed,
+            # no steps translated) and is disabled like any other blocker.
+            self._mark_pipeline_blocked()
+        return ParseResult(pipeline=self.pipeline, findings=self._findings)
+
+    # ---- surrounding Groovy --------------------------------------------
+
+    def _scripted_finding(self, tok) -> Finding:
+        return self._make(
+            PB_SCRIPT,
+            "scripted pipeline",
+            "The file is a scripted pipeline (or arbitrary Groovy), not a "
+            "declarative pipeline. Scripted pipelines are not supported and "
+            "their contents were not analyzed.",
+            tok.line,
+            tok.col,
+            "Rewrite as a declarative pipeline, or migrate manually.",
+        )
+
+    def _skip_surrounding_statement(self) -> tuple[bool, tuple[int, int] | None]:
+        """Skip the rest of one prelude/postlude statement.
+
+        Consumes tokens up to (not including) the newline or semicolon that
+        closes the statement at bracket depth 0. Parentheses, braces, and
+        brackets inside the statement (parameter lists, function bodies,
+        closure literals, subscripts) are consumed as part of it, so a
+        multi-line function definition is skipped whole. Groovy strings are
+        single lexer tokens, so braces or the word ``pipeline`` inside them
+        are never structural.
+
+        Returns ``(terminated, nested_pipeline_pos)``: ``terminated`` is
+        False when the file ends before the statement is closed;
+        ``nested_pipeline_pos`` is the (line, col) of a ``pipeline {`` token
+        sequence inside the skipped span, if any.
+        """
+        depth = 0
+        nested_pipeline: tuple[int, int] | None = None
+        while True:
+            tok = self._peek()
+            if tok.kind == EOF:
+                return False, nested_pipeline
+            if (
+                tok.kind == IDENT
+                and tok.value == "pipeline"
+                and self._peek(1).kind == LBRACE
+                and nested_pipeline is None
+            ):
+                nested_pipeline = (tok.line, tok.col)
+            if tok.kind in (LPAREN, LBRACE, LBRACKET):
+                depth += 1
+                self._advance()
+                continue
+            if tok.kind in (RPAREN, RBRACE, RBRACKET):
+                if depth == 0:
+                    # A stray closer inside the surrounding content: consume
+                    # it so the scan always advances; the statement still
+                    # ends at the next depth-0 newline or semicolon.
+                    self._advance()
+                    continue
+                depth -= 1
+                self._advance()
+                continue
+            if depth == 0 and tok.kind in (NEWLINE, SEMI):
+                return True, nested_pipeline
+            self._advance()
+
+    def _scan_prelude(self) -> list[Finding] | None:
+        """Scan the Groovy before a top-level pipeline block.
+
+        Recognized statement classes (documented, limited grammar): import
+        statements, annotations, variable declarations, and function
+        definitions. Everything they contain is skipped, never evaluated.
+
+        Returns the buffered surrounding-Groovy findings when the scan
+        reaches a top-level ``pipeline`` block. Returns None when there is
+        no top-level pipeline block (scripted pipeline, or an unrecognized
+        statement): self._findings then carries exactly the one PB-SCRIPT
+        blocker and the buffered findings are discarded, so a scripted
+        file's report is unchanged from previous releases.
+        """
+        self._skip_newlines()
+        if self._peek().kind == EOF:
             # An empty (or comments-only) file is malformed input: there is
             # no pipeline here at all, not even a scripted one to report.
             raise MalformedPipelineError(
                 "the file is empty; there is no pipeline to migrate", 1, 1
             )
-
-        if self._peek().kind == "ANNOTATION":
+        first = self._peek()
+        buffered: list[Finding] = []
+        nested_pipeline: tuple[int, int] | None = None
+        while True:
+            self._skip_newlines()
             tok = self._peek()
-            self._add(
-                PB_LIB,
-                "shared library annotation",
-                "Shared libraries are not supported by the MVP.",
-                tok.line,
-                tok.col,
-                "Inline the library steps or migrate them manually; list every "
-                "custom step used from the library.",
-            )
+            if tok.kind == EOF:
+                self._findings = [self._scripted_finding(first)]
+                return None
+            if tok.kind == IDENT and tok.value == "pipeline":
+                if nested_pipeline is not None:
+                    raise MalformedPipelineError(
+                        "more than one 'pipeline' block occurrence was found; "
+                        "which one is the declarative pipeline is ambiguous",
+                        nested_pipeline[0],
+                        nested_pipeline[1],
+                    )
+                return buffered
+            recognized, shape = self._scan_prelude_statement(buffered)
+            if not recognized:
+                # Arbitrary Groovy: the prelude is a script. Unchanged
+                # scripted classification, buffered findings discarded.
+                self._findings = [self._scripted_finding(first)]
+                return None
+            if shape is not None and nested_pipeline is None:
+                nested_pipeline = shape
+
+    def _scan_prelude_statement(self, buffered: list[Finding]) -> tuple[bool, tuple[int, int] | None]:
+        """Recognize and record one prelude statement.
+
+        Returns ``(recognized, nested_pipeline_pos)``. A False ``recognized``
+        means the statement is arbitrary Groovy outside the documented
+        grammar (the caller falls back to the scripted classification).
+        Recognized statements are never evaluated: their text is skipped and
+        reported through a finding.
+        """
+        tok = self._peek()
+        if tok.kind == ANNOTATION:
             self._advance()
-            self._skip_statement()
-            self._skip_newlines()
+            if tok.value == "@Library":
+                # Existing stable behavior for shared libraries (unchanged).
+                buffered.append(
+                    self._make(
+                        PB_LIB,
+                        "shared library annotation",
+                        "Shared libraries are not supported by the MVP.",
+                        tok.line,
+                        tok.col,
+                        "Inline the library steps or migrate them manually; list every "
+                        "custom step used from the library.",
+                    )
+                )
+            else:
+                buffered.append(
+                    self._make(
+                        PB_GROOVY_PRELUDE,
+                        "annotation before the pipeline block",
+                        "This annotation is Groovy that pipebridge does not "
+                        "evaluate; its effect on the Jenkins runtime is not "
+                        "represented in the generated workflow.",
+                        tok.line,
+                        tok.col,
+                        "Reproduce the needed effect deliberately in the "
+                        "workflow, or migrate the annotation manually.",
+                    )
+                )
+            _, shape = self._skip_surrounding_statement()
+            return True, shape
+        if tok.kind == IDENT and tok.value == "import":
+            return self._scan_import_statement(buffered)
+        if tok.kind == IDENT:
+            return self._scan_declaration_or_function(buffered)
+        return False, None
 
-        if self._peek().kind == IDENT and self._peek().value == "pipeline":
-            self._parse_pipeline()
+    def _scan_import_statement(self, buffered: list[Finding]) -> tuple[bool, tuple[int, int] | None]:
+        """Recognize one ``import`` statement (documented, limited grammar):
+
+        ``import [static] a.b.Class`` — a dotted identifier path, optionally
+        ending in the ``.*`` wildcard, terminated by a newline or semicolon.
+        ``as`` aliasing and any other form are NOT supported: the statement
+        is then reported as a PB-GROOVY-PRELUDE blocker.
+        """
+        start = self._advance()  # 'import'
+        parts: list[str] = []
+        supported = True
+        if self._peek().kind == IDENT and self._peek().value == "static":
+            self._advance()
+            parts.append("static")
+        if self._peek().kind != IDENT:
+            supported = False
         else:
+            parts.append(self._advance().value)
+            while supported and self._peek().kind == DOT:
+                self._advance()
+                nxt = self._peek()
+                if nxt.kind in (IDENT, OTHER):
+                    parts.append(nxt.value)
+                    self._advance()
+                else:
+                    supported = False
+        path = ".".join(parts[1:]) if parts and parts[0] == "static" else ".".join(parts)
+        if parts and parts[0] == "static":
+            path = "static " + path
+        terminated = self._peek().kind in (NEWLINE, SEMI, EOF)
+        if supported and terminated:
+            buffered.append(
+                self._make(
+                    PB_GROOVY_IMPORT,
+                    "import statement",
+                    f"Import '{path}' is ordinary import syntax: it only "
+                    "brings symbols into the Groovy runtime. pipebridge does "
+                    "not evaluate it, and nothing about it is carried into "
+                    "the generated workflow.",
+                    start.line,
+                    start.col,
+                    "No action is needed for the import itself; references "
+                    "to imported symbols in steps are reported separately.",
+                )
+            )
+            return True, None
+        # Recognized as an import statement, but outside the supported
+        # grammar: executable surrounding Groovy → blocker, not info.
+        buffered.append(
+            self._make(
+                PB_GROOVY_PRELUDE,
+                "unsupported import statement",
+                f"Import '{path}' uses syntax outside the supported form "
+                "('import [static] some.package.Class', optionally ending "
+                "in '.*'; 'as' aliasing is not supported). It was not "
+                "evaluated.",
+                start.line,
+                start.col,
+                "Use the supported import form, or migrate the import "
+                "manually.",
+            )
+        )
+        _, shape = self._skip_surrounding_statement()
+        return True, shape
+
+    def _scan_declaration_or_function(self, buffered: list[Finding]) -> tuple[bool, tuple[int, int] | None]:
+        """Recognize one prelude variable declaration or function definition.
+
+        Limited grammar: zero or more modifiers (public/private/protected/
+        static/final), then ``def`` or a type name, then a name; a function
+        definition continues with a parameter list and body. The rest of the
+        statement (any initializer, parameter list, body) is skipped and
+        never evaluated: even a literal initializer is reported as a blocker
+        because pipebridge does not decide that any initializer is harmless.
+        """
+        start = self._peek()
+        while (
+            self._peek().kind == IDENT
+            and self._peek().value in _DECLARATION_MODIFIERS
+        ):
+            self._advance()
+        tok = self._peek()
+        if tok.kind != IDENT:
+            return False, None
+        if tok.value in _RESERVED_STATEMENT_KEYWORDS and tok.value != "def":
+            return False, None
+        self._advance()  # 'def' or a type name
+        name = self._peek()
+        if name.kind != IDENT:
+            return False, None
+        self._advance()  # variable or function name
+        is_function = self._peek().kind == LPAREN
+        _, shape = self._skip_surrounding_statement()
+        if is_function:
+            construct = "function definition before the pipeline block"
+            message = (
+                "This function definition is executable Groovy; pipebridge "
+                "does not evaluate or translate it, and calls to it from "
+                "steps remain unsupported and are reported separately."
+            )
+        else:
+            construct = "variable declaration before the pipeline block"
+            message = (
+                "This variable declaration is executable Groovy that runs "
+                "at Jenkins runtime before the pipeline starts; pipebridge "
+                "does not evaluate it, and any value it computes is not "
+                "carried into the generated workflow. Even an unused "
+                "variable can have a side-effecting initializer."
+            )
+        buffered.append(
+            self._make(
+                PB_GROOVY_PRELUDE,
+                construct,
+                message,
+                start.line,
+                start.col,
+                "Recreate the needed value or behavior in a workflow step "
+                "or repository script, deliberately chosen by a human; do "
+                "not assume it exists in the migrated workflow.",
+            )
+        )
+        return True, shape
+
+    def _scan_postlude(self) -> list[Finding]:
+        """Scan the Groovy after the pipeline block (helper functions, …).
+
+        Every statement after the block is executable surrounding Groovy and
+        produces a PB-GROOVY-POSTLUDE blocker; nothing is evaluated or
+        translated. Unterminated trailing content is reported the same way
+        (a blocker, not a parse error). A further ``pipeline`` occurrence —
+        at top level or inside a skipped statement — is rejected: pipebridge
+        never silently selects one of several pipeline blocks.
+        """
+        findings: list[Finding] = []
+        while True:
+            self._skip_newlines()
             tok = self._peek()
-            self._add(
-                PB_SCRIPT,
-                "scripted pipeline",
-                "The file is a scripted pipeline (or arbitrary Groovy), not a "
-                "declarative pipeline. Scripted pipelines are not supported and "
-                "their contents were not analyzed.",
-                tok.line,
-                tok.col,
-                "Rewrite as a declarative pipeline, or migrate manually.",
+            if tok.kind == EOF:
+                return findings
+            if tok.kind == IDENT and tok.value == "pipeline":
+                raise MalformedPipelineError(
+                    "more than one 'pipeline' block occurrence was found; "
+                    "which one is the declarative pipeline is ambiguous",
+                    tok.line,
+                    tok.col,
+                )
+            start = tok
+            terminated, shape = self._skip_surrounding_statement()
+            if shape is not None:
+                raise MalformedPipelineError(
+                    "more than one 'pipeline' block occurrence was found; "
+                    "which one is the declarative pipeline is ambiguous",
+                    shape[0],
+                    shape[1],
+                )
+            construct = self._postlude_construct()
+            if terminated:
+                message = (
+                    "This Groovy content after the pipeline block is "
+                    "executable; pipebridge does not evaluate or translate "
+                    "it, and calls to it from steps remain unsupported and "
+                    "are reported separately."
+                )
+            else:
+                message = (
+                    "The Groovy content after the pipeline block is not "
+                    "closed: the file ends in the middle of this statement. "
+                    "It was skipped without evaluation."
+                )
+            findings.append(
+                self._make(
+                    PB_GROOVY_POSTLUDE,
+                    construct,
+                    message,
+                    start.line,
+                    start.col,
+                    "Recreate the needed behavior deliberately in the "
+                    "workflow (a step or a repository script); do not "
+                    "assume this code runs after the migrated pipeline.",
+                )
             )
 
-        if self.pipeline is not None:
-            self._validate_required_structure()
-            self._skip_newlines()
-            tail = self._peek()
-            if tail.kind != EOF:
-                self._add(
-                    PB_SYNTAX,
-                    "unexpected content after the pipeline block",
-                    "Only comments may follow the pipeline block.",
-                    tail.line,
-                    tail.col,
-                    "Remove or move the trailing content.",
-                )
-        return ParseResult(pipeline=self.pipeline, findings=self._findings)
+    def _postlude_construct(self) -> str:
+        """Label the upcoming postlude statement (no tokens consumed)."""
+        tok = self._peek()
+        if tok.kind == ANNOTATION:
+            return "annotation after the pipeline block"
+        if tok.kind == IDENT:
+            is_type_or_def = tok.value == "def" or tok.value not in _RESERVED_STATEMENT_KEYWORDS
+            name = self._peek(1)
+            paren = self._peek(2)
+            if is_type_or_def and name.kind == IDENT and paren.kind == LPAREN:
+                return "function definition after the pipeline block"
+        return "Groovy content after the pipeline block"
 
     # ---- grammar -------------------------------------------------------
 

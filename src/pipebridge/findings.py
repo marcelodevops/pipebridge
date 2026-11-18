@@ -33,6 +33,9 @@ PB_ASSUME_CHECKOUT = "PB-ASSUME-CHECKOUT"
 PB_ASSUME_SHELL = "PB-ASSUME-SHELL"
 PB_TRIGGER_MANUAL = "PB-TRIGGER-MANUAL"
 PB_SINGLE_JOB = "PB-SINGLE-JOB"
+PB_GROOVY_IMPORT = "PB-GROOVY-IMPORT"
+PB_GROOVY_PRELUDE = "PB-GROOVY-PRELUDE"
+PB_GROOVY_POSTLUDE = "PB-GROOVY-POSTLUDE"
 
 REGISTRY: dict[str, tuple[str, str]] = {
     PB_SCRIPT: (SEVERITY_BLOCKER, "Scripted pipeline syntax or script block"),
@@ -58,6 +61,9 @@ REGISTRY: dict[str, tuple[str, str]] = {
     PB_ASSUME_SHELL: (SEVERITY_INFO, "Shell and execution-environment differences"),
     PB_TRIGGER_MANUAL: (SEVERITY_INFO, "Workflow triggers on workflow_dispatch only"),
     PB_SINGLE_JOB: (SEVERITY_INFO, "Sequential stages kept in one job to preserve workspace state"),
+    PB_GROOVY_IMPORT: (SEVERITY_INFO, "Ordinary Groovy import statement before the pipeline block"),
+    PB_GROOVY_PRELUDE: (SEVERITY_BLOCKER, "Executable Groovy before the pipeline block"),
+    PB_GROOVY_POSTLUDE: (SEVERITY_BLOCKER, "Executable Groovy after the pipeline block"),
 }
 
 ALL_CODES = frozenset(REGISTRY)
