@@ -33,12 +33,13 @@ plus category markers) and direct verification. Inspected and **excluded**:
 `jenkinsci/jenkins` (flagship, but **scripted** pipeline, not declarative),
 `jenkinsci/docker` (scripted), `jenkins-infra` repos (scripted/shared-library),
 `nimble-platform/k8s` (scripted), `kingdee/kd-charts` (scripted),
-`hmrc/lambda-maxmind-downloader` (scripted). **Terraform:** after systematic
-search, **no official project repository** publishes a declarative Terraform
-Jenkinsfile (HashiCorp/OpenTofu use GitHub Actions; remaining hits are
-personal/educational repos). The infrastructure category is therefore
-represented by the HMRC government deployment pipeline (#6); this is a
-recorded limit of the sample, not a claim that category is Terraform-tested.
+`hmrc/lambda-maxmind-downloader` (scripted). **Terraform:** **none found in this search.** The searches used surfaced no
+official project repository with a declarative Terraform Jenkinsfile — the
+remaining hits were personal/educational repos. This is a statement about
+this search only, not about the ecosystem. The infrastructure category is
+therefore represented by the HMRC government deployment pipeline (#6); this
+is a recorded limit of the sample, not a claim that the category is
+Terraform-tested.
 
 **Secrets/sensitive-data inspection (manual read of every file):**
 
@@ -74,30 +75,41 @@ blocker/warning/info); info findings (`PB-ASSUME-SHELL`, `PB-SINGLE-JOB`,
 `PB-TRIGGER-MANUAL`, `PB-ASSUME-RUNNER`) were emitted as documented.
 
 **No parser crash occurred on any file (no exit 1); all generated
-`workflow.yml` files parsed as valid YAML; no draft silently omitted behavior —
-untranslated content is loudly marked (`[NOT MIGRATED]` step, blocker
-enumeration, `if: false`).** Two systemic problems were found:
+`workflow.yml` files parsed as valid YAML; drafts are loud about what was
+not translated (`[NOT MIGRATED]` step, `if: false`). The finding list is
+**not** complete in every case, however: nested constructs inside pipelines
+with pipeline-level blockers are not enumerated (D2), so "everything was
+reported" is **not** claimed.** Two systemic problems were found:
 
-### D1 (correctness/accuracy defect): Groovy prelude/postlude causes wholesale `PB-SCRIPT` misclassification
+### D1 (correctness/accuracy defect): Groovy prelude/postlude discards or truncates the analysis
 
-5 of 7 sample files wrap a declarative pipeline in Groovy that the tool
-refuses to even look past:
+5 of 7 sample files wrap a declarative pipeline in surrounding Groovy:
 
 - **Prelude** (Groovy statements before `pipeline {`): `import` (couchbase #2),
-  `def`/`String` variable declarations (tutanota #4, memphis #5, hmrc #6) — **4/7 files**.
+  `def`/`String` variable declarations (tutanota #4, memphis #5, hmrc #6) — **4 files**.
 - **Postlude** (helper `def name() { … }` definitions after the closing brace):
-  jetty #1 (5 functions), tutanota #4, memphis #5 — **3/7 files**.
-- Combined prelude **or** postlude: **5/7 files (71%)**.
+  jetty #1 (5 functions), tutanota #4, memphis #5 — **3 files**.
+- Prelude and/or postlude: **5 of 7 files**.
+
+The two cases behave differently:
+
+- The **4 prelude files** are rejected wholesale as `PB-SCRIPT`: **zero
+  structure is extracted** — empty stage list, no per-construct findings —
+  even though the `pipeline {}` block is present and parseable.
+- **Jetty (postlude only)** is parsed and **partially extracted** first —
+  correct findings for `agent none` (L4), the options directive (L6), and
+  `post` (L106), plus the top-level stage in the draft — and only then
+  rejected at the trailing functions with `PB-SYNTAX`
+  ("unexpected content after the pipeline block", L123).
 
 Minimal probes with the release binary isolate the rule: a leading `def x = 1`
 before `pipeline {` yields `PB-SCRIPT` for the entire file; a trailing
-`def helper() { … }` yields `PB-SYNTAX` ("unexpected content after the
-pipeline block"). On **genuinely scripted** files (`jenkinsci/jenkins`,
-`jenkinsci/docker`) `PB-SCRIPT` is the correct classification — the code is
-right for scripts and wrong for the declarative-with-Groovy pattern. The
-consequence: for a majority of this sample the user receives **zero extracted
-structure** (empty stage list, no per-construct findings) for files whose
-`pipeline {}` block could have been parsed.
+`def helper() { … }` yields `PB-SYNTAX` after the pipeline block. On
+**genuinely scripted** files (`jenkinsci/jenkins`, `jenkinsci/docker`)
+`PB-SCRIPT` is the correct classification — the code is right for scripts and
+wrong for the declarative-with-Groovy pattern. The consequence: the four
+prelude files get zero extracted structure, and jetty's analysis is truncated
+by its postlude — for files whose `pipeline {}` blocks could have been parsed.
 
 ### D2 (completeness defect): nested constructs are not enumerated when pipeline-level blockers exist
 
@@ -131,13 +143,16 @@ outside the subset and does not.
 
 ## 4. Correctness defects vs missing features
 
-- **Defects (correctness of the report itself):** D1 (misclassification →
-  zero structure for 5/7 real files) and D2 (nested-construct under-reporting).
-- **Missing features (expected for the MVP subset, correctly reported):**
+- **Defects (correctness of the report itself):** D1 (prelude files lose all
+  structure; the postlude-only file's analysis is truncated) and D2
+  (nested-construct under-reporting).
+- **Missing features (expected for the MVP subset):**
   docker/dockerfile agents, `post`, `parallel`, `options`, `when`,
   `parameters`, `stash/unstash`, `withCredentials`, `input`, `timeout`,
-  `script` blocks, non-literal environment values. All were reported, never
-  silently dropped.
+  `script` blocks, non-literal environment values. Constructs the MVP parses
+  are reported — but **not all unsupported constructs are reported in every
+  case**: D2 shows that nested findings are incomplete when pipeline-level
+  blockers exist.
 - **Parser robustness:** no crashes; all files lexed/parsed or cleanly
   rejected; all outputs valid YAML.
 - **Runtime equivalence:** not tested and not claimed — the study is static
@@ -172,7 +187,7 @@ outside the subset and does not.
 - Categories were sourced from Jenkins-heavy ecosystems (Jenkins plugins org,
   Eclipse, enterprise/government users); projects that publish no declarative
   Jenkinsfile (HashiCorp, Kubernetes, most CNCF) are absent by construction.
-- The Terraform category is **unrepresented** (no official source found; see
+- The Terraform category is **unrepresented** (none found in this search; see
   collection notes).
 - Shared libraries (`@Library`, jetty's `infra.*`, HMRC's framework calls) are
   not resolved; findings only cover what is visible in the file.
@@ -182,56 +197,87 @@ outside the subset and does not.
 
 ## 7. Recommendation for v0.2.0 — ONE bounded feature
 
-**Fix D1 first (correctness before features): tolerate Groovy prelude and
-postlude around the declarative block — parse the `pipeline {}` block, report
-what was skipped, never evaluate it.**
+**Fix D1 first (correctness before features): recognize surrounding Groovy
+and extract the declarative pipeline structure for analysis.** The
+`pipeline {}` block is parsed and analyzed exactly as a pure declarative file
+is today (top-level stage list, per-construct findings, draft). Unmodeled
+**executable** Groovy around it is a **BLOCKER**, so generated drafts remain
+disabled exactly as today. Info-level findings are reserved for explicitly
+supported forms whose omission is demonstrably harmless. **Groovy is never
+evaluated.**
 
-- **Value:** 5/7 of this real-world sample currently yields no structure at
-  all (empty stage list, single misleading finding). The fix converts those
-  files from "unusable report" to "accurate, specific migration checklist"
-  without adding any new translation semantics. It also directly serves the
-  release promise: "everything outside it is reported, never approximated" —
-  today the prelude/postlude Groovy is neither reported nor translated.
+- **Value:** today 4 of 7 sample files lose all structure (wholesale
+  `PB-SCRIPT`, empty stage list) and the fifth (jetty) is parsed correctly
+  and then truncated by its postlude (`PB-SYNTAX` at the trailing functions).
+  The fix turns both cases into a complete, accurate report of the
+  declarative block — the user's migration checklist — without translating
+  anything new and without weakening the disabled-draft safety rule.
+- **Classification rules (explicit):**
+  1. **Prelude `import` statements** — the one *explicitly supported* form:
+     imports execute nothing, so their omission is demonstrably harmless →
+     **info-level** finding listing them; the pipeline block is analyzed.
+  2. **Prelude variable declarations** (`def`/`String`/…, **any** initializer)
+     — **executable Groovy, unmodeled → BLOCKER.** Initializers run at
+     Jenkins runtime; an unused variable can still have a side-effecting
+     initializer (memphis computes a random id; hmrc derives names from
+     `env.JOB_NAME`). They are never evaluated, never classified as "safe",
+     and their values are not carried into the workflow.
+  3. **Postlude function definitions** (`def name(…) { … }` after the closing
+     brace) and **any other statement forms** — **executable Groovy,
+     unmodeled → BLOCKER.** Bodies are skipped by balanced-brace scanning —
+     not analyzed, not executed.
+  4. Content not covered by the recognized forms keeps today's behavior
+     (`PB-SCRIPT` for genuinely scripted files, `PB-SYNTAX` for stray
+     content after the recognized forms).
+- **Draft behavior (invariant, not relaxed):** a draft is disabled
+  (`if: false`, exit 2) whenever any blocker exists. Since every surrounding
+  executable-Groovy form in this increment is a blocker, all five affected
+  files keep disabled drafts; only the report improves.
 - **Implementation scope (bounded):**
-  - Lexer/parser entry: allow, before `pipeline {`: `import` statements and
-    simple variable declarations (`def`/`String`/`int`/…, literal or null RHS,
-    no calls); allow, after the closing brace: function definitions
-    (`def name(args) { … }`), skipped via balanced-brace scanning.
-  - Everything else before/after the block keeps today's behavior
-    (`PB-SCRIPT` for scripts, `PB-SYNTAX` otherwise).
-  - New stable finding codes (info or warning, never blockers), e.g.
-    `PB-GROOVY-PRELUDE` / `PB-GROOVY-POSTLUDE`: "N declaration(s)/function(s)
-    ignored; their values are computed at Jenkins runtime and were not
-    carried over."
-  - Function **calls** from within steps keep existing blockers
-    (`PB-LIB`/`PB-INTERP`) so nothing silently becomes translatable.
-- **Semantic risks:** declarations can have side effects (memphis computes a
-  random id at pipeline startup; hmrc derives the artifact name from
-  `env.JOB_NAME`) — the translation **must not** evaluate them; the risk is
-  a user assuming the generated workflow preserved those values. Mitigation:
-  explicit finding text + the draft stays disabled exactly as today when
-  real blockers exist. Brace-balanced skipping must not treat Groovy strings
-  containing braces as structure (use the existing `groovystrings` lexer).
-- **Required tests (fixture matrix):** imports-only prelude; single `def`
-  declaration; `String` declaration with expression RHS; trailing function;
-  prelude+postlude combined; genuinely scripted file still `PB-SCRIPT`;
-  comment/shebang-only file unchanged (no new findings); call to a postlude
-  function from a step still blocks; all existing 157 tests pass unchanged;
-  golden outputs for each fixture.
+  - Lexer/parser entry: recognize prelude imports and declarations, and
+    postlude function definitions; skip declaration/function bodies via
+    balanced-brace scanning using the existing `groovystrings` lexer (Groovy
+    strings containing braces must not read as block structure).
+  - New stable finding codes, e.g. `PB-GROOVY-IMPORT` (info),
+    `PB-GROOVY-PRELUDE` (blocker), `PB-GROOVY-POSTLUDE` (blocker).
+  - Function **calls** from within steps keep their existing blockers
+    (`PB-LIB`/`PB-INTERP`); nothing silently becomes translatable.
+- **Semantic risks:** (1) classifying an initializer as side-effect-free is
+  the core trap — therefore no initializer is ever classified; only imports
+  get info level. (2) Brace-skipping mis-scoping — mitigated by the
+  lexer-based scanner plus tests with brace-containing strings and comments.
+  (3) A user assuming declared values were preserved — mitigated by explicit
+  finding text ("values are computed at Jenkins runtime and were not carried
+  over") and by the draft staying disabled.
+- **Required tests (fixture matrix):** imports-only prelude (info finding;
+  structure extracted); `def` declaration with a side-effecting initializer
+  (blocker; structure extracted); `String` declaration with a **literal**
+  initializer (still a blocker — no "safe initializer" special case);
+  trailing function (blocker; structure extracted); prelude+postlude
+  combined; genuinely scripted file still `PB-SCRIPT`; comment/shebang-only
+  file unchanged (no new findings); a call to a postlude function from a step
+  still blocks; **the generated draft is disabled in every Groovy-surrounding
+  fixture**; golden outputs for each fixture; all existing 157 tests pass
+  unchanged.
 - **Acceptance criteria:**
   1. For the five affected sample files' **synthetic equivalents** in
-     `synthetic/`, `analyze` no longer emits `PB-SCRIPT`/postlude
-     `PB-SYNTAX`; it emits the declarative findings (agents, `post`, …) plus
-     the new prelude/postlude info findings, and the draft lists **all**
-     stages.
-  2. `jenkinsci/jenkins`-style scripted files (probe fixtures) still yield
+     `synthetic/`: `analyze` no longer emits `PB-SCRIPT` (the four prelude
+     files) or the postlude `PB-SYNTAX` (jetty); it emits the declarative
+     findings for the `pipeline {}` block (agents, `post`, options, …), the
+     new prelude/postlude findings per the classification rules above, and
+     the draft lists **every top-level stage**. Deeper enumeration (nested
+     parallel branches, per-branch agents) remains deferred as D2.
+  2. Every fixture with surrounding executable Groovy still produces a
+     **disabled** draft (`if: false`) and exit code 2.
+  3. `jenkinsci/jenkins`-style scripted files (probe fixtures) still yield
      `PB-SCRIPT`.
-  3. All generated workflows remain valid YAML; no behavior change for pure
+  4. All generated workflows remain valid YAML; no behavior change for pure
      declarative files (kymatio #3, do400 #7 outputs byte-identical).
-  4. Full test suite green on Python 3.10 and 3.13; CI green.
+  5. Full test suite green on Python 3.10 and 3.13; CI green.
 - **Out of scope for v0.2.0** (explicitly): translating any of the newly
-  visible constructs (post/parallel/agents/…), D2's deeper enumeration, and
-  any Terraform-specific handling.
+  visible constructs (post/parallel/agents/…), evaluating any Groovy,
+  classifying any initializer as safe, D2's deeper enumeration, and any
+  Terraform-specific handling.
 
 ## 8. Reproduction
 
