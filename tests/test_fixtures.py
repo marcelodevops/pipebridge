@@ -220,9 +220,9 @@ def test_k8s_custom_agent_conversion(tmp_path):
 
     report = json.loads((out / "migration-report.json").read_text())
     codes = {f["code"] for f in report["findings"] if f["severity"] == "blocker"}
-    # The custom agent blocks the whole pipeline: stage bodies (including the
-    # script block) are never traversed, so PB-AGENT is the only blocker.
-    assert codes == {"PB-AGENT"}
+    # The custom agent blocks the whole pipeline, but D2 still diagnoses the
+    # script block that used to be invisible; its contents are never entered.
+    assert codes == {"PB-AGENT", "PB-SCRIPT"}
     # The report says the contents were not analyzed.
     md = (out / "migration-report.md").read_text()
     assert "not analyzed" in md or "NOT migrated" in md
