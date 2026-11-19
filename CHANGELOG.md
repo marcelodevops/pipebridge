@@ -10,6 +10,8 @@ Diagnostic traversal inside blocked scopes (defect D2). Findings in those
 scopes are a migration checklist, not translated behavior. `sh`, `echo`,
 and `checkout` arguments are validated there too: interpolation, dynamic
 expressions, and unsupported checkout forms are reported, not translated.
+Argument recovery stops at a top-level semicolon, so a later sibling on
+the same line is still reported.
 Exit codes, disabled drafts, and the supported subset are unchanged. No
 version bump.
 

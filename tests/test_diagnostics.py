@@ -484,6 +484,152 @@ def test_stage_blocked_scope_validates_step_arguments_and_later_sibling():
     assert "PB-AGENT" not in blocker_codes(result)
 
 
+_SEMICOLON_STEPS = """
+                echo env.JOB_NAME; mavenBuild 'job'
+                sh "echo " + env.BUILD_NUMBER; mavenBuild 'concat'
+                sh "echo " + "x; y"; mavenBuild 'concat-string'
+                echo "keep; this"; mavenBuild 'string-semi'
+                sh 'cmd; still one'; mavenBuild 'literal-semi'
+                echo call(env.JOB_NAME; 'nested'); mavenBuild 'nested-paren'
+                echo items[0; 1]; mavenBuild 'nested-bracket'
+                echo closure { def x = 1; x }; mavenBuild 'nested-brace'
+                sh("echo " + env.BUILD_NUMBER); mavenBuild 'paren-form'
+"""
+
+_SEMICOLON_SIBLINGS = (
+    "mavenBuild 'job'",
+    "mavenBuild 'concat'",
+    "mavenBuild 'concat-string'",
+    "mavenBuild 'string-semi'",
+    "mavenBuild 'literal-semi'",
+    "mavenBuild 'nested-paren'",
+    "mavenBuild 'nested-bracket'",
+    "mavenBuild 'nested-brace'",
+    "mavenBuild 'paren-form'",
+)
+
+
+def _semicolon_source(prefix: str, *, opaque: str = "") -> str:
+    return prefix + opaque + _SEMICOLON_STEPS + """
+            }
+        }
+    }
+}
+"""
+
+
+def _assert_semicolon_recovery(result, source: str, stage_name: str) -> None:
+    text = "\n".join(f.message + f.construct for f in result.findings)
+    assert "DO_NOT_REPORT" not in text
+    assert "hidden" not in text
+    assert "Expected ')'" not in text
+    assert all(stage.steps == [] for stage in result.pipeline.stages)
+
+    siblings = [f for f in result.findings if f.construct == "step 'mavenBuild'"]
+    assert [(f.line, f.col) for f in siblings] == [
+        _pos(source, needle) for needle in _SEMICOLON_SIBLINGS
+    ]
+    assert all(f"stage '{stage_name}'" in f.message for f in siblings)
+
+    echo_dynamic = [
+        f for f in result.findings
+        if f.construct == "echo step" and "requires a string" in f.message
+    ]
+    assert [(f.line, f.col) for f in echo_dynamic] == [
+        _pos(source, "env.JOB_NAME"),
+        _pos(source, "call(env.JOB_NAME"),
+        _pos(source, "items[0; 1]"),
+        _pos(source, "closure {"),
+    ]
+    assert all(f"stage '{stage_name}'" in f.message for f in echo_dynamic)
+
+    interps = [f for f in result.findings if "dynamic Groovy expression" in f.message]
+    assert [(f.line, f.col) for f in interps] == [
+        _pos(source, "+ env.BUILD_NUMBER"),
+        _pos(source, '+ "x; y"'),
+        _pos(source, "+ env.BUILD_NUMBER)"),
+    ]
+    assert all(f"stage '{stage_name}'" in f.message for f in interps)
+
+    # A semicolon inside a literal is not a split, and the opaque script's
+    # sibling must stay unreported. The visible mavenBuild on those lines is
+    # a separate finding.
+    assert not any(
+        f.line == _pos(source, 'echo "keep; this"')[0] and f.construct == "echo step"
+        for f in result.findings
+    )
+    assert not any(
+        f.line == _pos(source, "sh 'cmd; still one'")[0] and f.construct == "sh step"
+        for f in result.findings
+    )
+    if "mavenBuild 'hidden'" in source:
+        hidden = _pos(source, "mavenBuild 'hidden'")
+        assert not any((f.line, f.col) == hidden for f in result.findings)
+
+    keys = [(f.code, f.line, f.col) for f in result.findings]
+    assert len(keys) == len(set(keys))
+    assert [(f.line, f.col, f.code) for f in result.findings] == sorted(
+        (f.line, f.col, f.code) for f in result.findings
+    )
+
+
+def test_pipeline_blocked_scope_recovers_at_top_level_semicolons():
+    source = _semicolon_source("""pipeline {
+    agent none
+    stages {
+        stage('Hidden') {
+            steps {""")
+    result = parse(source)
+    assert result.pipeline.blocked is True
+    _assert_semicolon_recovery(result, source, "Hidden")
+    assert blocker_codes(result).count("PB-AGENT") == 1
+
+
+def test_stage_blocked_scope_recovers_at_top_level_semicolons():
+    source = _semicolon_source(
+        """pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {""",
+        opaque="""
+                script {
+                    sh "echo ${env.DO_NOT_REPORT}; mavenBuild 'hidden'"
+                }
+""",
+    )
+    result = parse(source)
+    assert result.pipeline.blocked is False
+    assert result.pipeline.stages[0].blocked is True
+    _assert_semicolon_recovery(result, source, "Build")
+    assert blocker_codes(result).count("PB-SCRIPT") == 1
+    assert "PB-AGENT" not in blocker_codes(result)
+
+
+def test_eligible_semicolon_separated_literals_stay_translated():
+    source = """pipeline {
+    agent any
+    stages {
+        stage('A') {
+            steps {
+                sh 'make; not a split'; echo "plain; still one"
+                checkout scm
+            }
+        }
+    }
+}
+"""
+    result = parse(source)
+    assert blocker_codes(result) == []
+    assert [step.kind for step in result.pipeline.stages[0].steps] == [
+        "sh",
+        "echo",
+        "checkout",
+    ]
+    assert result.pipeline.stages[0].steps[0].text == "make; not a split"
+    assert result.pipeline.stages[0].steps[1].text == "plain; still one"
+
+
 def test_eligible_literal_steps_are_not_false_blockers():
     source = """pipeline {
     agent any

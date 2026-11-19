@@ -2150,14 +2150,42 @@ class _Parser:
             tok.col,
             "Use a literal string, or compute the value in a workflow step deliberately.",
         )
-        self._skip_statement()
+        self._skip_diagnostic_argument()
 
     def _consume_dynamic_argument(self) -> None:
         """Consume one non-literal argument without interpreting it."""
         if self._peek().kind == LPAREN:
             self._skip_step_tail()
             return
-        self._skip_statement()
+        self._skip_diagnostic_argument()
+
+    def _skip_diagnostic_argument(self) -> None:
+        """Consume one diagnostic argument, stopping before a top-level terminator.
+
+        Terminators are a newline or semicolon, or a closer that belongs to
+        the enclosing call or block. Nested (), [], and {} keep semicolons
+        that appear inside them. String tokens are atomic, so a semicolon
+        inside a string is not a terminator. Shared statement recovery is
+        unchanged: translation still uses ``_skip_statement``.
+        """
+        depth = 0
+        while True:
+            tok = self._peek()
+            if tok.kind == EOF:
+                return
+            if tok.kind in (LPAREN, LBRACE, LBRACKET):
+                depth += 1
+                self._advance()
+                continue
+            if tok.kind in (RPAREN, RBRACE, RBRACKET):
+                if depth == 0:
+                    return
+                depth -= 1
+                self._advance()
+                continue
+            if depth == 0 and tok.kind in (NEWLINE, SEMI):
+                return
+            self._advance()
 
     def _diagnose_step(self, stage_name: str, name: str, tok) -> None:
         if name in ("sh", "echo", "checkout"):
