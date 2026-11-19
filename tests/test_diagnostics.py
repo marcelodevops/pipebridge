@@ -140,7 +140,7 @@ def test_clean_example_is_byte_identical_and_exits_zero(tmp_path):
 
 @pytest.mark.parametrize(
     "name",
-    ["python-gpu-kymatio-like", "node-minimal-do400-like"],
+    ["python-gpu-kymatio-like"],
 )
 def test_blocked_synthetics_keep_exit_2_and_structure(name, tmp_path):
     baseline = (BASELINES / f"{name}.workflow.yml").read_text()

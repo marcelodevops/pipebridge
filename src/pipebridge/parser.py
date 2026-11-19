@@ -24,6 +24,8 @@ Design rules:
 
 from __future__ import annotations
 
+import re
+
 from .errors import MalformedPipelineError
 from .findings import Finding, REGISTRY, PB_AGENT, PB_CRED, PB_ENVVAL, PB_GROOVY_IMPORT, PB_GROOVY_POSTLUDE, PB_GROOVY_PRELUDE, PB_INPUT, PB_INTERP, PB_LIB, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
 from .groovystrings import Decoded, decode_string
@@ -50,6 +52,10 @@ from .lexer import (
 from .model import EnvVar, ParseResult, Pipeline, Span, Stage, Step
 
 STRING_KINDS = (STRING_SQ, STRING_DQ, STRING_TS, STRING_TD)
+
+# Bounded pipeline-level agent label grammar. Deliberately narrow: it maps a
+# selector, not an environment, and never evaluates Groovy.
+_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 # Bounded diagnostic traversal: step wrappers whose closure is a steps list,
 # not opaque Groovy. Only these are entered during diagnosis.
@@ -764,6 +770,7 @@ class _Parser:
 
         self._advance()  # '{'
         saw_stages = False
+        saw_agent = False
         while True:
             self._skip_newlines()
             tok = self._peek()
@@ -796,7 +803,27 @@ class _Parser:
 
             name = tok.value
             if name == "agent":
-                self._parse_agent(pipeline_level=True)
+                if saw_agent:
+                    self._add(
+                        PB_SYNTAX,
+                        "agent section",
+                        "Duplicate 'agent' section.",
+                        tok.line,
+                        tok.col,
+                        "Keep a single pipeline-level agent section.",
+                    )
+                    self._mark_pipeline_blocked()
+                    # Ambiguous runner selection: fall back to the documented
+                    # ubuntu-latest skeleton rather than picking a winner.
+                    self.pipeline.has_agent_any = False
+                    self.pipeline.agent_span = None
+                    self.pipeline.agent_label = None
+                    self.pipeline.agent_label_span = None
+                    self._advance()
+                    self._skip_statement()
+                else:
+                    saw_agent = True
+                    self._parse_agent(pipeline_level=True)
             elif name == "environment":
                 self._advance()
                 self._parse_env_block(self.pipeline.env, context="pipeline environment", scope=None)
@@ -906,18 +933,28 @@ class _Parser:
         self._skip_newlines()
         nxt = self._peek()
 
-        def block(message: str, code: str = PB_AGENT) -> None:
+        def block(
+            message: str,
+            *,
+            code: str = PB_AGENT,
+            at=None,
+            suggestion: str = (
+                "Choose the runner deliberately (runs-on) and document "
+                "tool/network needs."
+            ),
+        ) -> None:
             if pipeline_level:
                 self._mark_pipeline_blocked()
             else:
                 self._mark_stage_blocked(self._current_stage)
+            where = at or tok
             self._add(
                 code,
                 "agent declaration",
                 message,
-                tok.line,
-                tok.col,
-                "Choose the runner deliberately (runs-on) and document tool/network needs.",
+                where.line,
+                where.col,
+                suggestion,
             )
 
         if nxt.kind == IDENT and nxt.value == "any":
@@ -934,11 +971,14 @@ class _Parser:
             )
             return
         if nxt.kind == LBRACE:
-            block(
-                "Custom agents (label, node, docker, dockerfile, kubernetes) are "
-                "not supported by the MVP; the agent configuration was not analyzed."
-            )
-            self._skip_balanced(LBRACE, RBRACE)
+            if not pipeline_level:
+                block(
+                    "Custom agents (label, node, docker, dockerfile, kubernetes) are "
+                    "not supported by the MVP; the agent configuration was not analyzed."
+                )
+                self._skip_balanced(LBRACE, RBRACE)
+                return
+            self._parse_pipeline_agent_block(tok)
             return
         self._add(
             PB_SYNTAX,
@@ -946,13 +986,101 @@ class _Parser:
             "Could not parse the agent declaration.",
             nxt.line,
             nxt.col,
-            "Use 'agent any' or report this pipeline as requiring manual migration.",
+            "Use 'agent any' or 'agent { label '<literal>' }', or report this "
+            "pipeline as requiring manual migration.",
         )
         if pipeline_level:
             self._mark_pipeline_blocked()
         else:
             self._mark_stage_blocked(self._current_stage)
         self._skip_statement()
+
+    def _parse_pipeline_agent_block(self, agent_tok) -> None:
+        """Parse one pipeline-level ``agent { ... }`` block.
+
+        Only a single ``label '<literal>'`` statement is accepted. Every other
+        shape stays a ``PB-AGENT`` blocker. An interpolated label is also
+        diagnosed with ``PB-INTERP`` at the interpolation, because D2 requires
+        diagnostics even when translation is ineligible; it is never mapped.
+        """
+        self._advance()  # '{'
+        self._skip_newlines()
+        stmt = self._peek()
+
+        unsupported = (
+            "Only a pipeline-level 'agent { label '<literal>' }' block is "
+            "supported by the MVP; this agent configuration was not analyzed."
+        )
+
+        def reject(message: str) -> None:
+            self._mark_pipeline_blocked()
+            self._add(
+                PB_AGENT,
+                "agent declaration",
+                message,
+                agent_tok.line,
+                agent_tok.col,
+                "Use a literal label identifying an existing self-hosted runner, "
+                "or choose the runner deliberately (runs-on).",
+            )
+
+        if stmt.kind != IDENT or stmt.value != "label":
+            reject(unsupported)
+            self._skip_rest_of_block()
+            return
+
+        self._advance()  # 'label'
+        self._skip_newlines()
+        value_tok = self._peek()
+        if value_tok.kind not in (STRING_SQ, STRING_DQ):
+            # Triple-quoted strings and the label('x') call form are outside
+            # the documented single-quoted/double-quoted literal grammar.
+            reject(unsupported)
+            self._skip_rest_of_block()
+            return
+
+        self._advance()
+        decoded = decode_string(
+            value_tok.value, value_tok.kind, value_tok.line, value_tok.col
+        )
+        if decoded.has_interpolation:
+            for interp in decoded.interpolations:
+                self._add(
+                    PB_INTERP,
+                    "Groovy interpolated string in agent label",
+                    f"Groovy would substitute '{interp.text}' in the agent label "
+                    "at pipeline runtime; pipebridge only maps literal labels.",
+                    interp.line,
+                    interp.col,
+                    "Use a literal label or choose the runner deliberately (runs-on).",
+                )
+            reject("The agent label is a dynamic Groovy string; it was not mapped.")
+            self._skip_rest_of_block()
+            return
+
+        self._skip_newlines()
+        if self._peek().kind != RBRACE:
+            reject(unsupported)  # extra directive(s) in the block
+            self._skip_rest_of_block()
+            return
+        self._advance()  # '}'
+
+        value = decoded.value or ""
+        if not _LABEL_RE.match(value):
+            reject(
+                f"Agent label '{value}' is outside the supported label grammar "
+                "(letters, digits, '_', '.', and '-' only; 1-64 characters)."
+            )
+            return
+        if value.lower() == "self-hosted":
+            reject(
+                f"Agent label '{value}' is the reserved GitHub label "
+                "'self-hosted', compared case-insensitively; it was not mapped."
+            )
+            return
+
+        self.pipeline.agent_label = value
+        self.pipeline.agent_label_span = Span(agent_tok.line, agent_tok.col)
 
     def _parse_env_block(self, target: list[EnvVar], context: str, scope: "Stage | None" = None) -> None:
         if self._peek().kind != LBRACE:

@@ -49,6 +49,9 @@ class Pipeline:
     span: Span
     has_agent_any: bool = False
     agent_span: Span | None = None
+    # Accepted pipeline-level literal label (unsupported forms stay blocked).
+    agent_label: str | None = None
+    agent_label_span: Span | None = None
     env: list[EnvVar] = field(default_factory=list)
     stages: list[Stage] = field(default_factory=list)
     blocked: bool = False

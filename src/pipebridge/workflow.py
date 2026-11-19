@@ -138,7 +138,12 @@ def generate_workflow(analysis: AnalysisResult, source_name: str = "Jenkinsfile"
             "    # This condition is a literal false: the job never runs until a human removes it."
         )
         lines.append("    if: false")
-    lines.append("    runs-on: ubuntu-latest")
+    if pipeline.agent_label is not None:
+        lines.append(
+            f"    runs-on: [self-hosted, {_yaml_scalar(pipeline.agent_label)}]"
+        )
+    else:
+        lines.append("    runs-on: ubuntu-latest")
 
     if pipeline.env:
         lines.append("    env:")

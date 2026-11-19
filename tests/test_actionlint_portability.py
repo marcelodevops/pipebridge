@@ -9,6 +9,7 @@ import shutil
 
 import pytest
 
+from pipebridge.errors import ValidationError
 from pipebridge.validation import run_actionlint, validate_generated_workflow
 
 VALID_WORKFLOW = (
@@ -98,3 +99,36 @@ def test_actionlint_reports_real_structural_failure(tmp_path):
     assert result["available"] is True
     assert result["ok"] is False
     assert result.get("structural_errors"), "a structural failure must be classified"
+
+
+LABELED_WORKFLOW = VALID_WORKFLOW.replace(
+    "runs-on: ubuntu-latest",
+    "runs-on: [self-hosted, nodejs]",
+)
+BROKEN_LABELED_WORKFLOW = BROKEN_WORKFLOW.replace(
+    "runs-on: ubuntu-latest",
+    "runs-on: [self-hosted, nodejs]",
+)
+
+
+@pytest.mark.skipif(
+    not ACTIONLINT_AVAILABLE,
+    reason="actionlint is not installed locally; the custom-label suppression "
+    "is only observable with the real tool",
+)
+def test_custom_self_hosted_label_is_disclosed_not_a_generation_failure(tmp_path):
+    result = validate_generated_workflow(LABELED_WORKFLOW, tmp_path / "workflow.yml")
+    ignored = result["actionlint"]["ignored_rules"]
+    assert result["actionlint"]["ok"] is True
+    assert 'label ".+" is unknown' in ignored
+    assert "constant expression" not in " ".join(ignored)
+
+
+@pytest.mark.skipif(
+    not ACTIONLINT_AVAILABLE,
+    reason="actionlint is not installed locally; the structural-failure case "
+    "requires the real tool",
+)
+def test_self_hosted_label_does_not_hide_structural_lint_errors(tmp_path):
+    with pytest.raises(ValidationError, match="failed actionlint"):
+        validate_generated_workflow(BROKEN_LABELED_WORKFLOW, tmp_path / "workflow.yml")

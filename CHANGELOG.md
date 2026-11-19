@@ -4,6 +4,17 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Pipeline-level literal agent labels (`agent { label 'nodejs' }`) are mapped
+to `runs-on: [self-hosted, nodejs]` and reported as `PB-ASSUME-RUNNER-LABEL`.
+This carries a runner selector only. It does not claim the GitHub runner
+exists or matches the Jenkins agent's OS, tools, network, permissions, or
+workspace. actionlint's hosted-runner catalog does not include those custom
+labels; that one unknown-label message is suppressed and disclosed in the
+report, and every other lint failure still rejects the conversion.
+Unsupported agent forms stay blocked. No version bump.
+
 ## [0.2.1] — Alpha (2026-11-19)
 
 **Diagnostic completeness inside blocked scopes (defect D2), not broader

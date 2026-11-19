@@ -96,7 +96,8 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 | --- | --- | --- |
 | One declarative `pipeline { }` block | ✅ Supported | Groovy **around** the block is recognized and reported (see rows below) but never evaluated or translated; genuinely scripted pipelines are still rejected with `PB-SCRIPT` |
 | `agent any` | ⚠️ With assumption | Target runner assumed `ubuntu-latest`; Jenkins `agent any` does **not** establish OS, installed tools, or network access (`PB-ASSUME-RUNNER`) |
-| `agent none`, `label`, `node`, `docker`, `dockerfile`, `kubernetes` | ❌ Blocked | `PB-AGENT` |
+| Pipeline-level `agent { label '<literal>' }` | ⚠️ With assumption | Mapped to `runs-on: [self-hosted, <label>]` (`PB-ASSUME-RUNNER-LABEL`). This selects a runner label; it does **not** claim the same machine, OS, tools, network, or permissions. Expressions, variables, `self-hosted` in any casing, and every other label shape stay blocked |
+| `agent none`, stage-level agents, `node`, `docker`, `dockerfile`, `kubernetes`, label expressions | ❌ Blocked | `PB-AGENT` |
 | Sequential `stages` / `stage` / `steps` | ✅ Supported | Kept as sequential steps in **one** job so the filesystem (workspace) state is preserved between stages (`PB-SINGLE-JOB`) |
 | `sh` with literal strings, including multiline | ✅ Supported | Emitted as `run:` block scalars; shell variables like `$MY_VAR` are preserved as shell variables |
 | `echo` with literal strings | ✅ Supported | Translated to `printf '%s\n' …` to preserve Jenkins `echo` semantics (no shell expansion of the argument) |
@@ -172,7 +173,7 @@ Every report contains:
 | `PB-CRED` | blocker | Credentials / credential bindings |
 | `PB-PARALLEL` | blocker | `parallel` execution |
 | `PB-MATRIX` | blocker | `matrix` execution |
-| `PB-AGENT` | blocker | Custom / Docker / Kubernetes / labeled agent, or `agent none` |
+| `PB-AGENT` | blocker | Unsupported agent declaration (`agent none`, stage-level agents, node/docker/dockerfile/kubernetes, label expressions, or a label outside the literal grammar) |
 | `PB-TOOLS` | blocker | `tools` declaration |
 | `PB-WHEN` | blocker | Stage conditions (`when`) |
 | `PB-PARAM` | blocker | `parameters` |
@@ -186,6 +187,7 @@ Every report contains:
 | `PB-GHEXPR` | warning | GitHub expression syntax in source literal (escaped in output) |
 | `PB-SHELLCHECK` | warning | shellcheck note about a faithfully-migrated script (reported against the generated workflow; never fails the conversion) |
 | `PB-ASSUME-RUNNER` | info | `agent any` → `ubuntu-latest` assumption |
+| `PB-ASSUME-RUNNER-LABEL` | info | Pipeline-level literal agent label mapped to `runs-on: [self-hosted, label]`; not a claim that the runner matches the Jenkins agent |
 | `PB-ASSUME-CHECKOUT` | info | Source checkout: implicit default checkout modeled for translated pipelines, and/or explicit `checkout scm` → `actions/checkout` in the migrated repository |
 | `PB-ASSUME-SHELL` | info | Shell and execution-environment differences |
 | `PB-TRIGGER-MANUAL` | info | Workflow triggers `workflow_dispatch` only |
@@ -354,9 +356,10 @@ The report is explicit about what was and was not read.
 - Credentials, parameters, triggers, conditions, approvals, and post actions are never migrated — they require human decisions.
 - `echo` becomes `printf '%s\n'` to preserve semantics; output is identical but the command differs.
 - The runner assumption (`ubuntu-latest`) is just that — an assumption. Jenkins `agent any` guarantees nothing about OS, tools, or network.
+- A pipeline-level literal agent label is carried into `runs-on: [self-hosted, label]`. That is a selector mapping, not runtime equivalence: pipebridge does not claim a matching runner exists, is online, or has the same OS, tools, network, permissions, or workspace behavior. Jenkins label expressions, variables, and stage-level agents are not mapped. A label that looks like a GitHub-hosted runner (`ubuntu-latest`) is still emitted as self-hosted; edit `runs-on` deliberately if a hosted runner is intended.
 - The implicit checkout models Jenkins' default behavior but cannot verify the migrated repository is the right source; a pipeline that never checked out source (artifact-only jobs) must have the implicit step removed by a human.
 - Multi-file output replacement is staged with rollback, but is **not** crash-atomic: a process kill between the individual file renames can leave a partial set on disk. Handled failures (I/O errors) roll back byte-for-byte; if a rollback restoration itself fails, the rollback is incomplete — the original bytes remain in a recovery backup whose path is reported, and a human must restore it.
-- `actionlint` runs only when installed locally; the report says so explicitly either way.
+- `actionlint` runs only when installed locally; the report says so explicitly either way. Its hosted-runner catalog does not include custom self-hosted labels, so that one unknown-label message is suppressed and listed in the report when a labeled `runs-on` list was generated. Other lint failures still reject the conversion. This is not evidence that the runner exists.
 - Generated workflows are **never executed** by pipebridge; "passes validation" means YAML parsing and linting only.
 - No confidence percentage: pipebridge reports facts, not vibes.
 

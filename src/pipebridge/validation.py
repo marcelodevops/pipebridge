@@ -22,6 +22,12 @@ import yaml
 from .errors import ValidationError
 
 _ACTIONLINT_TIMEOUT_SECONDS = 60
+# actionlint's hosted-runner catalog cannot know a user-defined self-hosted
+# label. Suppress only that message when we emitted a self-hosted list; every
+# other lint failure still rejects the conversion. The suppression is stored
+# on the actionlint result as ``ignored_rules``.
+_UNKNOWN_SELF_HOSTED_LABEL = 'label ".+" is unknown'
+_SELF_HOSTED_RUNS_ON = "runs-on: [self-hosted,"
 
 
 def validate_yaml_text(text: str) -> dict:
@@ -138,7 +144,11 @@ def validate_generated_workflow(workflow_text: str, workflow_path, disabled: boo
     Raises :class:`ValidationError` when the generated workflow is not
     valid, so a failed conversion never leaves artifacts behind. When
     ``disabled`` (blockers exist), the deliberate constant-false job
-    condition is disclosed as the single suppressed lint rule.
+    condition is disclosed as a suppressed lint rule. A generated
+    ``runs-on: [self-hosted, label]`` list also suppresses actionlint's
+    unknown-hosted-label message: that catalog cannot know a Jenkins label,
+    and the suppression is disclosed the same way. It does not mean the
+    runner exists.
     """
     yaml_result = validate_yaml_text(workflow_text)
     if not yaml_result["ok"]:
@@ -147,6 +157,8 @@ def validate_generated_workflow(workflow_text: str, workflow_path, disabled: boo
     # Lint from a temp file in the system temp directory: this runs BEFORE
     # any output directory is created, so a failed validation leaves nothing.
     ignore = ['constant expression "false" in condition'] if disabled else []
+    if _SELF_HOSTED_RUNS_ON in workflow_text:
+        ignore.append(_UNKNOWN_SELF_HOSTED_LABEL)
     temp_path = Path(tempfile.gettempdir()) / f"pipebridge-actionlint-{os.getpid()}.yml"
     temp_path.write_text(workflow_text, encoding="utf-8")
     try:

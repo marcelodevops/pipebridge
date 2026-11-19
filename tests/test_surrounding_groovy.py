@@ -585,7 +585,7 @@ def test_affected_synthetic_lists_every_top_level_stage_and_disables_draft(name,
 
 @pytest.mark.parametrize(
     "name",
-    ["python-gpu-kymatio-like", "node-minimal-do400-like"],
+    ["python-gpu-kymatio-like"],
 )
 def test_blocked_pure_declarative_synthetics_keep_structure(name, tmp_path):
     """D2 only adds diagnostic findings; blocked drafts keep their shape.
