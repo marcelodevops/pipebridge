@@ -580,21 +580,29 @@ def test_affected_synthetic_lists_every_top_level_stage_and_disables_draft(name,
         assert code in found, f"{name}: missing {code}"
 
 
-# ---- byte-identical pure declarative outputs ----------------------------
+# ---- blocked pure declarative outputs stay structurally identical -------
 
 
 @pytest.mark.parametrize(
     "name",
     ["python-gpu-kymatio-like", "node-minimal-do400-like"],
 )
-def test_pure_declarative_synthetics_remain_byte_identical(name, tmp_path):
+def test_blocked_pure_declarative_synthetics_keep_structure(name, tmp_path):
+    """D2 only adds diagnostic findings; blocked drafts keep their shape.
+
+    Diagnostic finding sets are embedded in the placeholder command, so the
+    comparison normalizes exactly that code list and nothing executable.
+    """
     from pipebridge.cli import main
 
-    golden = REPO_ROOT / "tests" / "goldens" / "pure-declarative" / f"{name}.workflow.yml"
+    from tests.d2_support import assert_structurally_equal
+
+    baseline = (
+        REPO_ROOT / "tests" / "baselines" / "d2" / f"{name}.workflow.yml"
+    ).read_text()
     jf = SYNTHETIC / f"{name}.Jenkinsfile"
     out = tmp_path / "migration"
-    main(["convert", str(jf), "--output", str(out)])
+    assert main(["convert", str(jf), "--output", str(out)]) == 2
     generated = (out / "workflow.yml").read_text()
-    assert generated == golden.read_text(), (
-        "pure declarative output changed — regeneration must be deliberate"
-    )
+    assert "if: false" in generated
+    assert_structurally_equal(baseline, generated)

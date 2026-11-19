@@ -347,7 +347,7 @@ The report is explicit about what was and was not read.
 
 - The supported subset is deliberately small; anything outside it is reported, never approximated.
 - Surrounding Groovy is recognized only within a deliberately limited grammar (ordinary imports, annotations, variable declarations, function definitions). It is **never evaluated or translated**, and this is not complete Groovy parsing: an unrecognized statement before the block still classifies the whole file as `PB-SCRIPT`, and multiple or ambiguous `pipeline` occurrences are rejected rather than resolved.
-- Nested constructs inside blocked pipelines are not enumerated (D2, deferred: a `parallel` block inside a pipeline that already has a pipeline-level blocker produces no additional findings); the disabled draft and the report say what was and was not analyzed.
+- Findings inside a blocked scope are diagnostics, not translated behavior. pipebridge reports the triggering construct and the declarative siblings it can see, but it does not emit steps or nested stages from that scope, and the draft stays disabled. Opaque bodies (`script`, shared libraries, agent internals, `when` expressions, `post`, `withCredentials`, and unknown closures) are boundaries, not traversed code. See [`docs/d2-nested-diagnostics-design.md`](docs/d2-nested-diagnostics-design.md).
 - No Jenkins runtime equivalence is claimed or tested: values computed by surrounding Groovy at Jenkins runtime are not carried into any generated workflow.
 - One workflow, one job, `workflow_dispatch` only. No push/PR triggers in the MVP.
 - Groovy is supported only as far as literal string forms; any dynamic expression is a blocker.

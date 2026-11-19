@@ -212,9 +212,9 @@ evaluated.**
 > surrounding executable form is a blocker (disabled draft, exit 2), and
 > ordinary imports are info-level under a strict grammar. This is an
 > analysis improvement only — no new construct is translated and no Groovy
-> is evaluated. **D2 remains deferred:** nested constructs are still not
-> enumerated once a pipeline-level blocker exists. No broader conversion
-> support or Jenkins runtime equivalence is claimed.
+> is evaluated. **D2 follow-up:** nested declarative constructs inside a
+> blocked scope are now diagnosed (see below). That does not translate them.
+> No broader conversion support or Jenkins runtime equivalence is claimed.
 
 - **Value:** today 4 of 7 sample files lose all structure (wholesale
   `PB-SCRIPT`, empty stage list) and the fifth (jetty) is parsed correctly
@@ -291,6 +291,30 @@ evaluated.**
   visible constructs (post/parallel/agents/…), evaluating any Groovy,
   classifying any initializer as safe, D2's deeper enumeration, and any
   Terraform-specific handling.
+
+### D2 follow-up — diagnostics inside blocked scopes
+
+The §2 table above is the v0.1.0 before-state and is left unchanged.
+Diagnostic traversal now reports declarative constructs inside a blocked
+scope without translating them. Exit codes and `if: false` drafts are
+unchanged. Groovy is still never evaluated.
+
+Jetty-like (`java-maven-jetty-like.Jenkinsfile`), before → after:
+
+| Before (pipeline-level stop) | After (still exit 2, still disabled, still one top-level stage) |
+| --- | --- |
+| `PB-AGENT` L7, `PB-SYNTAX` L8 (options), `PB-POST` L42, three `PB-GROOVY-POSTLUDE` findings | Those findings remain, plus `PB-PARALLEL` L16, per-branch `PB-AGENT` L18/L31, `PB-WHEN` L19/L32, `PB-SYNTAX` timeout L21/L34, `PB-SCRIPT` L22, and `PB-SYNTAX` `mavenBuild` L26/L35 |
+
+`checkout scm` inside the blocked timeout is supported syntax, so it is not
+a finding and is not translated. Kymatio-like and DO400-like stay exit 2
+and disabled; Kymatio-like additionally reports the stage `dockerfile`
+agent and the interpolated environment value that the pipeline-level
+blocker used to hide.
+
+Remaining limitations: `script`, shared-library calls, agent internals,
+`when` expressions, `post`, `withCredentials`, and unknown closures are
+boundaries and are not entered. Traversal stops at depth 20 and says so.
+No nested model stage or translated step is created from a blocked scope.
 
 ## 8. Reproduction
 

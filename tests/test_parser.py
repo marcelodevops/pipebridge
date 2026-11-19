@@ -284,7 +284,12 @@ def test_unsupported_directives_map_to_specific_codes():
             "}\n"
         )
         result = parse(source)
-        assert blocker_codes(result) == [code], f"directive {directive}"
+        expected = [code]
+        if directive in ("parallel", "matrix"):
+            # The triggering construct's body is diagnosed too, so the
+            # unrecognized inner step is reported at its own boundary.
+            expected.append(F.PB_SYNTAX)
+        assert blocker_codes(result) == expected, f"directive {directive}"
         assert result.pipeline.stages[0].blocked is True
 
 

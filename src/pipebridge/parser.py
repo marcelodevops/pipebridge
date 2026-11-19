@@ -51,6 +51,15 @@ from .model import EnvVar, ParseResult, Pipeline, Span, Stage, Step
 
 STRING_KINDS = (STRING_SQ, STRING_DQ, STRING_TS, STRING_TD)
 
+# Bounded diagnostic traversal: step wrappers whose closure is a steps list,
+# not opaque Groovy. Only these are entered during diagnosis.
+# ``withCredentials`` is recognized, but its body stays opaque: credentials
+# are never extracted. ``wrap`` is not on the allowlist.
+_WRAPPER_STEPS = frozenset(
+    {"timeout", "retry", "catchError", "dir", "withEnv"}
+)
+_MAX_DIAGNOSTIC_DEPTH = 20
+
 # Keywords that begin a Groovy statement but can never name a type. A prelude
 # statement starting with one of these is arbitrary Groovy (a script), not a
 # recognized declaration.
@@ -94,6 +103,12 @@ class _Parser:
         self._tokens = tokenize(source)
         self._pos = 0
         self._findings: list[Finding] = []
+        # Dedupe key for findings: the same construct at the same position is
+        # reported once, even when translation and diagnosis both reach it.
+        self._finding_keys: set[tuple[str, int, int]] = set()
+        # Parent-scope labels for diagnostic findings (outermost first).
+        self._scope: list[str] = []
+        self._diag_depth = 0
         self.pipeline: Pipeline | None = None
         # Required-structure bookkeeping: which stages parsed a steps
         # section, and which of those sections were non-empty.
@@ -172,6 +187,18 @@ class _Parser:
                 if depth == 0:
                     return
 
+    def _skip_remaining_arguments(self) -> None:
+        """Consume through the ')' of a call whose '(' was already consumed."""
+        depth = 1
+        while depth > 0:
+            tok = self._advance()
+            if tok.kind == EOF:
+                return
+            if tok.kind == LPAREN:
+                depth += 1
+            elif tok.kind == RPAREN:
+                depth -= 1
+
     def _skip_statement(self) -> None:
         """Consume tokens up to (not including) the next newline at depth 0."""
         depth = 0
@@ -244,14 +271,19 @@ class _Parser:
         )
 
     def _add(self, code: str, construct: str, message: str, line: int, col: int, suggestion: str) -> None:
+        key = (code, line, col)
+        if key in self._finding_keys:
+            return
+        self._finding_keys.add(key)
         self._findings.append(self._make(code, construct, message, line, col, suggestion))
 
-    def _decode_step_string(self, tok, context: str) -> Decoded | None:
+    def _decode_step_string(self, tok, context: str, *, scoped: bool = False) -> Decoded | None:
         """Decode a string token used in a step; None when interpolated."""
         decoded = decode_string(tok.value, tok.kind, tok.line, tok.col)
         if decoded.has_interpolation:
             interp = decoded.interpolations[0]
-            self._add(
+            add = self._add_scoped if scoped else self._add
+            add(
                 PB_INTERP,
                 f"Groovy interpolated string in {context}",
                 f"Groovy would substitute '{interp.text}' at pipeline runtime; "
@@ -291,6 +323,9 @@ class _Parser:
             # draft becomes a named skeleton (stages extracted and listed,
             # no steps translated) and is disabled like any other blocker.
             self._mark_pipeline_blocked()
+        # Source order keeps reports and diffs reviewable. The sort is stable,
+        # so findings emitted at the same position keep their emission order.
+        self._findings.sort(key=lambda f: (f.line, f.col, f.code))
         return ParseResult(pipeline=self.pipeline, findings=self._findings)
 
     # ---- surrounding Groovy --------------------------------------------
@@ -1170,8 +1205,10 @@ class _Parser:
 
         if self.pipeline.blocked:
             # Pipeline-level blocker: keep the stage name for the skeleton
-            # report, but do not traverse its body for steps.
-            self._skip_balanced(LBRACE, RBRACE)
+            # report, but do not traverse its body for steps. Diagnosis is
+            # still useful: the findings list is the migration checklist.
+            self._advance()  # '{'
+            self._diagnose_stage_body(stage.name)
             return
 
         self._parse_stage_body(stage)
@@ -1244,43 +1281,74 @@ class _Parser:
                 self._advance()
                 self._skip_step_tail()
             elif name == "parallel":
+                self._advance()
+                branches = self._scan_parallel_branch_names()
+                message = (
+                    f"Stage '{stage.name}' contains parallel branches, which are "
+                    "not supported by the MVP."
+                )
+                if branches:
+                    message += " Branches: " + ", ".join(
+                        f"'{branch}'" for branch in branches
+                    ) + "."
                 self._add(
                     PB_PARALLEL,
                     "parallel execution",
-                    f"Stage '{stage.name}' contains parallel branches, which are "
-                    "not supported by the MVP.",
+                    message,
                     tok.line,
                     tok.col,
                     "Split into separate jobs with explicit needs/dependencies.",
                 )
                 self._mark_stage_blocked(stage)
-                self._advance()
-                self._skip_step_tail()
+                self._diagnose_triggered(stage.name, "parallel")
+                self._diagnose_stage_remainder(stage.name)
+                return
             elif name == "matrix":
+                self._advance()
+                axes = self._scan_matrix_axis_names()
+                message = (
+                    f"Stage '{stage.name}' uses matrix execution, which is not "
+                    "supported by the MVP."
+                )
+                if axes:
+                    message += " Axes: " + ", ".join(f"'{axis}'" for axis in axes) + "."
                 self._add(
                     PB_MATRIX,
                     "matrix execution",
-                    f"Stage '{stage.name}' uses matrix execution, which is not "
-                    "supported by the MVP.",
+                    message,
                     tok.line,
                     tok.col,
                     "Translate to a workflow matrix strategy deliberately.",
                 )
                 self._mark_stage_blocked(stage)
+                self._diagnose_triggered(stage.name, "matrix")
+                self._diagnose_stage_remainder(stage.name)
+                return
+            elif name == "stages":
+                self._add(
+                    PB_SYNTAX,
+                    "nested stages",
+                    f"Stage '{stage.name}' contains nested stages, which are "
+                    "not supported by the MVP.",
+                    tok.line,
+                    tok.col,
+                    "Migrate the construct deliberately (see documentation).",
+                )
+                self._mark_stage_blocked(stage)
                 self._advance()
-                self._skip_step_tail()
-            elif name in ("post", "options", "tools", "stages"):
+                self._diagnose_triggered(stage.name, "stages")
+                self._diagnose_stage_remainder(stage.name)
+                return
+            elif name in ("post", "options", "tools"):
                 label = {
                     "post": "post section",
                     "options": "options directive",
                     "tools": "tools section",
-                    "stages": "nested stages",
                 }[name]
                 code = {
                     "post": PB_POST,
                     "options": PB_SYNTAX,
                     "tools": PB_TOOLS,
-                    "stages": PB_SYNTAX,
                 }[name]
                 message = {
                     "post": f"Stage '{stage.name}' has a post section; post "
@@ -1290,8 +1358,6 @@ class _Parser:
                     "changes stage behavior and is not supported by the MVP.",
                     "tools": f"Stage '{stage.name}' has a tools section; tool "
                     "installs are not supported by the MVP.",
-                    "stages": f"Stage '{stage.name}' contains nested stages, which "
-                    "are not supported by the MVP.",
                 }[name]
                 self._add(
                     code,
@@ -1319,9 +1385,9 @@ class _Parser:
                 self._skip_step_tail()
 
             if stage.blocked:
-                # Do not traverse the remainder of a blocked stage: the
-                # enclosing behavior is not preserved.
-                self._skip_rest_of_block()
+                # Translation stops here. Diagnosis continues through the
+                # remaining siblings so the findings list stays complete.
+                self._diagnose_stage_remainder(stage.name)
                 return
 
     def _parse_steps(self, stage: Stage) -> None:
@@ -1361,7 +1427,9 @@ class _Parser:
                 )
                 return
             if stage.blocked:
-                self._skip_rest_of_block()
+                # Translation already stopped; diagnose the rest of this steps
+                # list and let the caller continue with the stage siblings.
+                self._diagnose_steps_remainder(stage.name)
                 return
             if tok.kind != IDENT:
                 self._add(
@@ -1399,12 +1467,14 @@ class _Parser:
                 self._mark_stage_blocked(stage)
                 self._advance()
                 self._skip_step_tail()
+                self._diagnose_steps_remainder(stage.name)
+                return
             elif name == "withCredentials":
                 self._add(
                     PB_CRED,
                     "withCredentials binding",
                     f"Stage '{stage.name}' binds credentials; credentials are not "
-                    "migrated automatically.",
+                    "migrated automatically. The step body was not analyzed.",
                     tok.line,
                     tok.col,
                     "Create GitHub Actions secrets and reference them explicitly "
@@ -1413,12 +1483,19 @@ class _Parser:
                 self._mark_stage_blocked(stage)
                 self._advance()
                 self._skip_step_tail()
+                self._diagnose_steps_remainder(stage.name)
+                return
             else:
+                message = (
+                    f"Step '{name}' is not supported by the MVP; the enclosing "
+                    "stage was not translated."
+                )
+                if name not in _WRAPPER_STEPS and self._step_has_closure():
+                    message += " The step body was not analyzed."
                 self._add(
                     PB_SYNTAX,
                     f"step '{name}'",
-                    f"Step '{name}' is not supported by the MVP; the enclosing "
-                    "stage was not translated.",
+                    message,
                     tok.line,
                     tok.col,
                     "Check whether the step is a shared-library or plugin step and "
@@ -1426,7 +1503,12 @@ class _Parser:
                 )
                 self._mark_stage_blocked(stage)
                 self._advance()
-                self._skip_step_tail()
+                if name in _WRAPPER_STEPS:
+                    self._diagnose_wrapper_body(stage.name)
+                else:
+                    self._skip_step_tail()
+                self._diagnose_steps_remainder(stage.name)
+                return
 
     def _parse_sh(self, stage: Stage, span: Span) -> None:
         tok = self._peek()
@@ -1448,6 +1530,7 @@ class _Parser:
                         self._peek().col,
                         "Use sh('command').",
                     )
+                    self._skip_remaining_arguments()
                 return
             self._add(
                 PB_SYNTAX,
@@ -1459,7 +1542,7 @@ class _Parser:
                 "Use sh '<command>' and set the environment explicitly if needed.",
             )
             stage.blocked = True
-            self._skip_balanced(LPAREN, RPAREN)
+            self._skip_remaining_arguments()
             return
         if tok.kind in STRING_KINDS:
             self._advance()
@@ -1474,7 +1557,7 @@ class _Parser:
             "Use sh '<command>'.",
         )
         stage.blocked = True
-        self._skip_step_tail()
+        self._skip_statement()
 
     def _add_sh_step(self, stage: Stage, tok, span: Span) -> None:
         decoded = self._decode_step_string(tok, "sh")
@@ -1525,6 +1608,1038 @@ class _Parser:
         )
         stage.blocked = True
         self._skip_step_tail()
+
+
+    # ---- diagnostic traversal ------------------------------------------
+    #
+    # Diagnosis is read-only: it reports declarative constructs found inside
+    # scopes where translation is ineligible. It never appends a Step, never
+    # creates a Stage for the model, and never changes blocker state. Opaque
+    # bodies (script, shared libraries, agent internals, when expressions,
+    # post closures, unknown step closures) are reported once and skipped.
+
+    _BOUNDARY_SUFFIX = " Nested content in this block was not analyzed."
+
+    def _add_scoped(
+        self,
+        code: str,
+        construct: str,
+        message: str,
+        line: int,
+        col: int,
+        suggestion: str,
+    ) -> None:
+        if self._scope:
+            message = f"In {' → '.join(self._scope)}: {message}"
+        self._add(code, construct, message, line, col, suggestion)
+
+    def _depth_limited(self) -> bool:
+        if self._diag_depth < _MAX_DIAGNOSTIC_DEPTH:
+            return False
+        tok = self._peek()
+        self._add_scoped(
+            PB_SYNTAX,
+            "diagnostic traversal limit",
+            f"Diagnostic traversal stopped at the nesting depth limit "
+            f"({_MAX_DIAGNOSTIC_DEPTH}); deeper content was not analyzed.",
+            tok.line,
+            tok.col,
+            "Review the nested structure manually; the draft stays disabled.",
+        )
+        self._skip_rest_of_block()
+        return True
+
+    def _diagnose_stage_body(self, stage_name: str) -> None:
+        """Diagnose the inside of a stage body (opening brace consumed)."""
+        self._scope.append(f"stage '{stage_name}'")
+        try:
+            self._diagnose_stage_sections(stage_name)
+        finally:
+            self._scope.pop()
+
+    def _diagnose_stage_remainder(self, stage_name: str) -> None:
+        """Diagnose remaining siblings after translation stopped (inside a stage)."""
+        self._diagnose_stage_body(stage_name)
+
+    def _diagnose_steps_remainder(self, stage_name: str) -> None:
+        """Diagnose the rest of a steps list (opening brace already consumed)."""
+        self._scope.append(f"stage '{stage_name}'")
+        try:
+            self._diagnose_steps_body(stage_name)
+        finally:
+            self._scope.pop()
+
+    def _diagnose_triggered(self, stage_name: str, kind: str) -> None:
+        """Diagnose the eligible body of the construct that blocked a stage."""
+        self._scope.append(f"stage '{stage_name}'")
+        try:
+            if kind == "parallel":
+                self._diagnose_parallel_block()
+            elif kind == "matrix":
+                self._diagnose_matrix_block()
+            elif kind == "stages":
+                self._diagnose_stages_block()
+        finally:
+            self._scope.pop()
+
+    def _diagnose_stage_sections(self, stage_name: str) -> None:
+        if self._depth_limited():
+            return
+        self._diag_depth += 1
+        try:
+            while True:
+                self._skip_newlines()
+                tok = self._peek()
+                if tok.kind == RBRACE:
+                    self._advance()
+                    return
+                if tok.kind == EOF:
+                    self._add_scoped(
+                        PB_SYNTAX,
+                        "stage block",
+                        "Unterminated stage block; analysis of this scope stopped.",
+                        tok.line,
+                        tok.col,
+                        "Add the missing '}'.",
+                    )
+                    return
+                if tok.kind != IDENT:
+                    self._add_scoped(
+                        PB_SYNTAX,
+                        "stage section",
+                        f"Unrecognized declarative syntax "
+                        f"'{tok.value or tok.kind}' in the stage body; analysis "
+                        "of this scope stopped.",
+                        tok.line,
+                        tok.col,
+                        "Use stage sections only (agent, environment, steps, ...).",
+                    )
+                    self._skip_rest_of_block()
+                    return
+                section = self._advance()
+                self._diagnose_stage_section(stage_name, section)
+        finally:
+            self._diag_depth -= 1
+
+    def _diagnose_stage_section(self, stage_name: str, section) -> None:
+        name = section.value
+        if name == "agent":
+            self._diagnose_agent()
+        elif name == "environment":
+            self._diagnose_environment_block()
+        elif name == "steps":
+            self._diagnose_steps_section(stage_name)
+        elif name == "when":
+            self._add_scoped(
+                PB_WHEN,
+                "when condition",
+                "A `when` condition is not supported by the MVP; conditional "
+                "execution was not translated." + self._BOUNDARY_SUFFIX,
+                section.line,
+                section.col,
+                "Translate to job/step-level 'if' conditions deliberately.",
+            )
+            self._skip_opaque_body()
+        elif name == "input":
+            self._add_scoped(
+                PB_INPUT,
+                "input approval gate",
+                "An `input` approval gate waits for interactive approval; no "
+                "workflow_dispatch equivalent exists." + self._BOUNDARY_SUFFIX,
+                section.line,
+                section.col,
+                "Use a GitHub environment with required reviewers.",
+            )
+            self._skip_opaque_body()
+        elif name == "options":
+            self._add_scoped(
+                PB_SYNTAX,
+                "options directive",
+                "The `options` directive changes stage behavior and is not "
+                "supported by the MVP." + self._BOUNDARY_SUFFIX,
+                section.line,
+                section.col,
+                "Migrate the option deliberately (e.g. timeout via timeout-minutes).",
+            )
+            self._skip_opaque_body()
+        elif name == "tools":
+            self._add_scoped(
+                PB_TOOLS,
+                "tools section",
+                "The `tools` section is not supported by the MVP; Jenkins-managed "
+                "tool installs have no automatic equivalent." + self._BOUNDARY_SUFFIX,
+                section.line,
+                section.col,
+                "Install the tools explicitly in the workflow.",
+            )
+            self._skip_opaque_body()
+        elif name == "post":
+            self._add_scoped(
+                PB_POST,
+                "post section",
+                "A `post` section is not supported by the MVP; post conditions "
+                "and their steps were not translated." + self._BOUNDARY_SUFFIX,
+                section.line,
+                section.col,
+                "Translate post conditions to job-level steps with explicit conditions.",
+            )
+            self._skip_opaque_body()
+        elif name == "parallel":
+            branches = self._scan_parallel_branch_names()
+            message = "`parallel` execution is not supported by the MVP."
+            if branches:
+                message += " Branches: " + ", ".join(
+                    f"'{branch}'" for branch in branches
+                ) + "."
+            self._add_scoped(
+                PB_PARALLEL,
+                "parallel execution",
+                message,
+                section.line,
+                section.col,
+                "Split into separate jobs with explicit needs/dependencies.",
+            )
+            self._diagnose_parallel_block()
+        elif name == "matrix":
+            axes = self._scan_matrix_axis_names()
+            message = "`matrix` execution is not supported by the MVP."
+            if axes:
+                message += " Axes: " + ", ".join(f"'{axis}'" for axis in axes) + "."
+            self._add_scoped(
+                PB_MATRIX,
+                "matrix execution",
+                message,
+                section.line,
+                section.col,
+                "Translate to a workflow matrix strategy deliberately.",
+            )
+            self._diagnose_matrix_block()
+        elif name == "stages":
+            self._add_scoped(
+                PB_SYNTAX,
+                "nested stages",
+                "Nested `stages` are not supported by the MVP.",
+                section.line,
+                section.col,
+                "Migrate the construct deliberately (see documentation).",
+            )
+            self._diagnose_stages_block()
+        else:
+            self._add_scoped(
+                PB_SYNTAX,
+                "stage section",
+                f"Unknown stage section '{name}'; analysis of this scope stopped.",
+                section.line,
+                section.col,
+                "Move it into steps or migrate manually.",
+            )
+            self._skip_rest_of_block()
+
+    def _skip_opaque_body(self) -> None:
+        """Skip a section body that is never interpreted as declarative syntax."""
+        self._skip_newlines()
+        if self._peek().kind == LBRACE:
+            self._skip_balanced(LBRACE, RBRACE)
+        else:
+            self._skip_step_tail()
+
+    def _diagnose_agent(self) -> None:
+        self._skip_newlines()
+        nxt = self._peek()
+        if nxt.kind == IDENT and nxt.value == "any":
+            self._advance()
+            return
+        if nxt.kind == IDENT and nxt.value == "none":
+            self._advance()
+            self._add_scoped(
+                PB_AGENT,
+                "agent declaration",
+                "'agent none' requires per-stage agents, which are not "
+                "supported by the MVP.",
+                nxt.line,
+                nxt.col,
+                "Choose the runner deliberately (runs-on).",
+            )
+            return
+        if nxt.kind == LBRACE:
+            self._add_scoped(
+                PB_AGENT,
+                "agent declaration",
+                "Custom agents (label, node, docker, dockerfile, kubernetes) are "
+                "not supported by the MVP; the agent configuration was not analyzed.",
+                nxt.line,
+                nxt.col,
+                "Choose the runner deliberately (runs-on) and document tool needs.",
+            )
+            self._skip_balanced(LBRACE, RBRACE)
+            return
+        self._add_scoped(
+            PB_SYNTAX,
+            "agent declaration",
+            "Could not parse the agent declaration.",
+            nxt.line,
+            nxt.col,
+            "Use 'agent any' or migrate manually.",
+        )
+        self._skip_statement()
+
+    def _diagnose_environment_block(self) -> None:
+        """Read-only environment scan: no EnvVar is kept and no scope is blocked."""
+        if self._peek().kind != LBRACE:
+            tok = self._peek()
+            self._add_scoped(
+                PB_SYNTAX,
+                "environment block",
+                "Expected '{' after 'environment'.",
+                tok.line,
+                tok.col,
+                "Fix the environment block syntax.",
+            )
+            self._skip_statement()
+            return
+        self._advance()  # '{'
+        while True:
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind == RBRACE:
+                self._advance()
+                return
+            if tok.kind == EOF:
+                self._add_scoped(
+                    PB_SYNTAX,
+                    "environment block",
+                    "Unterminated environment block.",
+                    tok.line,
+                    tok.col,
+                    "Add the missing '}'.",
+                )
+                return
+            if tok.kind != IDENT:
+                self._add_scoped(
+                    PB_SYNTAX,
+                    "environment block",
+                    f"Unexpected '{tok.value or tok.kind}' in environment block.",
+                    tok.line,
+                    tok.col,
+                    "Use NAME = 'value' entries only.",
+                )
+                self._advance()
+                self._skip_statement()
+                continue
+            name_tok = self._advance()
+            eq = self._peek()
+            if eq.kind != "EQUALS":
+                self._add_scoped(
+                    PB_SYNTAX,
+                    "environment block",
+                    f"Expected '=' after environment variable '{name_tok.value}'.",
+                    eq.line,
+                    eq.col,
+                    "Use NAME = 'value' entries only.",
+                )
+                self._skip_statement()
+                continue
+            self._advance()  # '='
+            value = self._peek()
+            if value.kind in STRING_KINDS:
+                self._advance()
+                decoded = decode_string(
+                    value.value, value.kind, value.line, value.col
+                )
+                if decoded.has_interpolation:
+                    interp = decoded.interpolations[0]
+                    self._add_scoped(
+                        PB_INTERP,
+                        f"Groovy interpolated string in environment variable "
+                        f"'{name_tok.value}'",
+                        f"Environment variable '{name_tok.value}' uses "
+                        f"interpolation ('{interp.text}'); its runtime value is "
+                        "dynamic.",
+                        interp.line,
+                        interp.col,
+                        "Compute the value in a workflow step deliberately.",
+                    )
+            elif value.kind == "NUMBER":
+                self._advance()
+            elif value.kind == IDENT and value.value in ("true", "false"):
+                self._advance()
+            elif (
+                value.kind == IDENT
+                and value.value == "credentials"
+                and self._peek(1).kind == LPAREN
+            ):
+                self._add_scoped(
+                    PB_CRED,
+                    "credentials() in environment block",
+                    f"Environment variable '{name_tok.value}' binds a Jenkins "
+                    "credential; credentials are not migrated automatically.",
+                    value.line,
+                    value.col,
+                    "Create a GitHub Actions secret and reference it explicitly.",
+                )
+                self._advance()
+                self._skip_balanced(LPAREN, RPAREN)
+            else:
+                self._add_scoped(
+                    PB_ENVVAL,
+                    f"non-literal environment value for '{name_tok.value}'",
+                    "Environment values must be literals (string, number, "
+                    "true/false) in the supported subset.",
+                    value.line,
+                    value.col,
+                    "Replace with a literal value or compute it in a step.",
+                )
+                self._skip_statement()
+
+    def _diagnose_steps_section(self, stage_name: str) -> None:
+        if self._peek().kind != LBRACE:
+            tok = self._peek()
+            self._add_scoped(
+                PB_SYNTAX,
+                "steps section",
+                "Expected '{' after 'steps'.",
+                tok.line,
+                tok.col,
+                "Use steps { ... }.",
+            )
+            self._skip_statement()
+            return
+        self._advance()  # '{'
+        self._diagnose_steps_body(stage_name)
+
+    def _diagnose_steps_body(self, stage_name: str) -> None:
+        if self._depth_limited():
+            return
+        self._diag_depth += 1
+        try:
+            while True:
+                self._skip_newlines()
+                tok = self._peek()
+                if tok.kind == RBRACE:
+                    self._advance()
+                    return
+                if tok.kind == EOF:
+                    self._add_scoped(
+                        PB_SYNTAX,
+                        "steps section",
+                        "Unterminated steps block; analysis of this scope stopped.",
+                        tok.line,
+                        tok.col,
+                        "Add the missing '}'.",
+                    )
+                    return
+                if tok.kind != IDENT:
+                    self._add_scoped(
+                        PB_SYNTAX,
+                        "step",
+                        f"Unrecognized step syntax '{tok.value or tok.kind}' in "
+                        "the steps block; analysis of this scope stopped.",
+                        tok.line,
+                        tok.col,
+                        "Use supported steps only (sh, echo, checkout scm).",
+                    )
+                    self._skip_rest_of_block()
+                    return
+                name_tok = self._advance()
+                self._diagnose_step(stage_name, name_tok.value, name_tok)
+        finally:
+            self._diag_depth -= 1
+
+    def _diagnose_supported_step(self, name: str) -> None:
+        """Validate a supported step's arguments without translating it."""
+        if name == "sh":
+            self._diagnose_sh_arguments()
+        elif name == "echo":
+            self._diagnose_echo_arguments()
+        else:
+            self._diagnose_checkout_arguments()
+
+    def _diagnose_sh_arguments(self) -> None:
+        tok = self._peek()
+        if tok.kind == LPAREN:
+            self._advance()
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind in STRING_KINDS:
+                self._advance()
+                self._decode_step_string(tok, "sh", scoped=True)
+                self._note_dynamic_continuation("sh")
+                if self._peek().kind == RPAREN:
+                    self._advance()
+                else:
+                    self._add_scoped(
+                        PB_SYNTAX,
+                        "sh step",
+                        "Expected ')' after the sh script string.",
+                        self._peek().line,
+                        self._peek().col,
+                        "Use sh('command').",
+                    )
+                    self._skip_remaining_arguments()
+                return
+            self._add_scoped(
+                PB_SYNTAX,
+                "sh step",
+                "sh with named arguments (label:, script:) is not supported by "
+                "the MVP; the enclosing stage was not translated.",
+                tok.line,
+                tok.col,
+                "Use sh '<command>' and set the environment explicitly if needed.",
+            )
+            self._skip_remaining_arguments()
+            return
+        if tok.kind in STRING_KINDS:
+            self._advance()
+            self._decode_step_string(tok, "sh", scoped=True)
+            self._note_dynamic_continuation("sh")
+            return
+        self._add_scoped(
+            PB_SYNTAX,
+            "sh step",
+            "sh requires a string argument in the supported subset.",
+            tok.line,
+            tok.col,
+            "Use sh '<command>'.",
+        )
+        self._consume_dynamic_argument()
+
+    def _diagnose_echo_arguments(self) -> None:
+        tok = self._peek()
+        if tok.kind in STRING_KINDS:
+            self._advance()
+            self._decode_step_string(tok, "echo", scoped=True)
+            self._note_dynamic_continuation("echo")
+            return
+        self._add_scoped(
+            PB_SYNTAX,
+            "echo step",
+            "echo requires a string argument in the supported subset.",
+            tok.line,
+            tok.col,
+            "Use echo '<message>'.",
+        )
+        self._consume_dynamic_argument()
+
+    def _diagnose_checkout_arguments(self) -> None:
+        tok = self._peek()
+        if tok.kind == IDENT and tok.value == "scm":
+            self._advance()
+            return
+        self._add_scoped(
+            PB_SYNTAX,
+            "checkout step",
+            "Only 'checkout scm' is supported by the MVP; the enclosing stage "
+            "was not translated.",
+            tok.line,
+            tok.col,
+            "Use 'checkout scm' or configure actions/checkout deliberately.",
+        )
+        self._consume_dynamic_argument()
+
+    def _note_dynamic_continuation(self, context: str) -> None:
+        """A literal followed by an operator is still a dynamic expression."""
+        tok = self._peek()
+        if tok.kind in (NEWLINE, SEMI, RBRACE, RPAREN, EOF) or tok.kind == IDENT:
+            return
+        self._add_scoped(
+            PB_INTERP,
+            f"Groovy dynamic expression in {context}",
+            "The step argument continues as a dynamic Groovy expression; "
+            "it was not evaluated or translated.",
+            tok.line,
+            tok.col,
+            "Use a literal string, or compute the value in a workflow step deliberately.",
+        )
+        self._skip_diagnostic_argument()
+
+    def _consume_dynamic_argument(self) -> None:
+        """Consume one non-literal argument without interpreting it."""
+        if self._peek().kind == LPAREN:
+            self._skip_step_tail()
+            return
+        self._skip_diagnostic_argument()
+
+    def _skip_diagnostic_argument(self) -> None:
+        """Consume one diagnostic argument, stopping before a top-level terminator.
+
+        Terminators are a newline or semicolon, or a closer that belongs to
+        the enclosing call or block. Nested (), [], and {} keep semicolons
+        that appear inside them. String tokens are atomic, so a semicolon
+        inside a string is not a terminator. Shared statement recovery is
+        unchanged: translation still uses ``_skip_statement``.
+        """
+        depth = 0
+        while True:
+            tok = self._peek()
+            if tok.kind == EOF:
+                return
+            if tok.kind in (LPAREN, LBRACE, LBRACKET):
+                depth += 1
+                self._advance()
+                continue
+            if tok.kind in (RPAREN, RBRACE, RBRACKET):
+                if depth == 0:
+                    return
+                depth -= 1
+                self._advance()
+                continue
+            if depth == 0 and tok.kind in (NEWLINE, SEMI):
+                return
+            self._advance()
+
+    def _diagnose_step(self, stage_name: str, name: str, tok) -> None:
+        if name in ("sh", "echo", "checkout"):
+            # The name is in the supported subset, but the argument form may
+            # not be. Validate it and never record a Step.
+            self._diagnose_supported_step(name)
+            return
+        if name == "script":
+            self._add_scoped(
+                PB_SCRIPT,
+                "script block",
+                "A `script` block contains arbitrary Groovy; it was not analyzed "
+                "or translated." + self._BOUNDARY_SUFFIX,
+                tok.line,
+                tok.col,
+                "Rewrite the logic as plain shell steps or migrate manually.",
+            )
+            self._skip_step_tail()
+            return
+        if name == "withCredentials":
+            self._add_scoped(
+                PB_CRED,
+                "withCredentials binding",
+                "`withCredentials` binds credentials; credentials are not "
+                "migrated automatically." + self._BOUNDARY_SUFFIX,
+                tok.line,
+                tok.col,
+                "Create GitHub Actions secrets and reference them explicitly "
+                "(secrets.<NAME>); rewrite the bound step manually.",
+            )
+            self._skip_step_tail()
+            return
+        message = (
+            f"Step '{name}' is not supported by the MVP; the enclosing stage "
+            "was not translated."
+        )
+        if name in _WRAPPER_STEPS:
+            self._add_scoped(
+                PB_SYNTAX,
+                f"step '{name}'",
+                message,
+                tok.line,
+                tok.col,
+                "Check whether the step is a shared-library or plugin step and "
+                "migrate it deliberately.",
+            )
+            self._diagnose_wrapper_body(stage_name)
+            return
+        if self._step_has_closure():
+            message += " The step body was not analyzed."
+        self._add_scoped(
+            PB_SYNTAX,
+            f"step '{name}'",
+            message,
+            tok.line,
+            tok.col,
+            "Check whether the step is a shared-library or plugin step and "
+            "migrate it deliberately.",
+        )
+        self._skip_step_tail()
+
+    def _diagnose_wrapper_body(self, stage_name: str) -> None:
+        """Consume a step wrapper's arguments, then diagnose its steps body."""
+        self._skip_newlines()
+        if self._peek().kind == LPAREN:
+            self._skip_balanced(LPAREN, RPAREN)
+        self._skip_newlines()
+        if self._peek().kind == LBRACE:
+            self._advance()  # '{'
+            self._diagnose_steps_body(stage_name)
+        else:
+            self._skip_step_tail()
+
+    def _diagnose_parallel_block(self) -> None:
+        self._skip_newlines()
+        if self._peek().kind == LPAREN:
+            self._skip_balanced(LPAREN, RPAREN)
+        self._skip_newlines()
+        if self._peek().kind != LBRACE:
+            tok = self._peek()
+            self._add_scoped(
+                PB_SYNTAX,
+                "parallel block",
+                "Could not parse the `parallel` block; analysis of this scope "
+                "stopped.",
+                tok.line,
+                tok.col,
+                "Use parallel { stage('Name') { ... } }.",
+            )
+            self._skip_statement()
+            return
+        self._advance()  # '{'
+        while True:
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind == RBRACE:
+                self._advance()
+                return
+            if tok.kind == EOF:
+                self._add_scoped(
+                    PB_SYNTAX,
+                    "parallel block",
+                    "Unterminated `parallel` block; analysis of this scope stopped.",
+                    tok.line,
+                    tok.col,
+                    "Add the missing '}'.",
+                )
+                return
+            if tok.kind == IDENT and tok.value == "stage":
+                header = self._advance()
+                self._diagnose_stage_directive(header, "parallel branch")
+                continue
+            self._add_scoped(
+                PB_SYNTAX,
+                "parallel block",
+                f"Unexpected '{tok.value or tok.kind}' in the `parallel` block; "
+                "analysis of this scope stopped.",
+                tok.line,
+                tok.col,
+                "Use parallel { stage('Name') { ... } }.",
+            )
+            self._skip_rest_of_block()
+            return
+
+    def _diagnose_matrix_block(self) -> None:
+        self._skip_newlines()
+        if self._peek().kind == LPAREN:
+            self._skip_balanced(LPAREN, RPAREN)
+        self._skip_newlines()
+        if self._peek().kind != LBRACE:
+            tok = self._peek()
+            self._add_scoped(
+                PB_SYNTAX,
+                "matrix block",
+                "Could not parse the `matrix` block; analysis of this scope stopped.",
+                tok.line,
+                tok.col,
+                "Use matrix { axes { ... } stages { ... } }.",
+            )
+            self._skip_statement()
+            return
+        self._advance()  # '{'
+        while True:
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind == RBRACE:
+                self._advance()
+                return
+            if tok.kind == EOF:
+                self._add_scoped(
+                    PB_SYNTAX,
+                    "matrix block",
+                    "Unterminated `matrix` block; analysis of this scope stopped.",
+                    tok.line,
+                    tok.col,
+                    "Add the missing '}'.",
+                )
+                return
+            if tok.kind == IDENT and tok.value == "axes":
+                self._advance()
+                self._skip_opaque_body()
+                continue
+            if tok.kind == IDENT and tok.value == "stages":
+                self._advance()
+                self._diagnose_stages_block()
+                continue
+            self._add_scoped(
+                PB_SYNTAX,
+                "matrix block",
+                f"Unexpected '{tok.value or tok.kind}' in the `matrix` block; "
+                "analysis of this scope stopped.",
+                tok.line,
+                tok.col,
+                "Use matrix { axes { ... } stages { ... } }.",
+            )
+            self._skip_rest_of_block()
+            return
+
+    def _diagnose_stages_block(self) -> None:
+        if self._peek().kind != LBRACE:
+            tok = self._peek()
+            self._add_scoped(
+                PB_SYNTAX,
+                "stages section",
+                "Expected '{' after 'stages'.",
+                tok.line,
+                tok.col,
+                "Fix the stages block syntax.",
+            )
+            self._skip_statement()
+            return
+        self._advance()  # '{'
+        while True:
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind == RBRACE:
+                self._advance()
+                return
+            if tok.kind == EOF:
+                self._add_scoped(
+                    PB_SYNTAX,
+                    "stages section",
+                    "Unterminated stages block; analysis of this scope stopped.",
+                    tok.line,
+                    tok.col,
+                    "Add the missing '}'.",
+                )
+                return
+            if tok.kind == IDENT and tok.value == "stage":
+                header = self._advance()
+                self._diagnose_stage_directive(header, "nested stage")
+                continue
+            self._add_scoped(
+                PB_SYNTAX,
+                "stages section",
+                f"Unexpected '{tok.value or tok.kind}' in the stages block; "
+                "analysis of this scope stopped.",
+                tok.line,
+                tok.col,
+                "Only stage directives are supported.",
+            )
+            self._skip_rest_of_block()
+            return
+
+    def _diagnose_stage_directive(self, header, label_kind: str) -> None:
+        """Diagnose `stage('Name') { ... }` without creating a model Stage."""
+        self._skip_newlines()
+        name = "<unparsed stage>"
+        if self._peek().kind != LPAREN:
+            tok = self._peek()
+            self._add_scoped(
+                PB_SYNTAX,
+                "stage directive",
+                "Expected '(' after 'stage'.",
+                tok.line,
+                tok.col,
+                "Use stage('Name') { ... }.",
+            )
+            self._skip_statement()
+            return
+        self._advance()  # '('
+        name_tok = self._peek()
+        if name_tok.kind in STRING_KINDS:
+            self._advance()
+            decoded = decode_string(
+                name_tok.value, name_tok.kind, name_tok.line, name_tok.col
+            )
+            if decoded.has_interpolation:
+                interp = decoded.interpolations[0]
+                self._add_scoped(
+                    PB_INTERP,
+                    "Groovy interpolated stage name",
+                    f"Stage name uses interpolation ('{interp.text}').",
+                    interp.line,
+                    interp.col,
+                    "Use a literal stage name.",
+                )
+            else:
+                name = decoded.value
+        else:
+            self._add_scoped(
+                PB_SYNTAX,
+                "stage directive",
+                "Stage name must be a string literal.",
+                name_tok.line,
+                name_tok.col,
+                "Use stage('Name') { ... }.",
+            )
+        if self._peek().kind == RPAREN:
+            self._advance()
+        else:
+            self._add_scoped(
+                PB_SYNTAX,
+                "stage directive",
+                "Expected ')' after the stage name.",
+                self._peek().line,
+                self._peek().col,
+                "Use stage('Name') { ... }.",
+            )
+        self._skip_newlines()
+        if self._peek().kind != LBRACE:
+            tok = self._peek()
+            self._add_scoped(
+                PB_SYNTAX,
+                "stage directive",
+                "Expected '{' to open the stage body.",
+                tok.line,
+                tok.col,
+                "Use stage('Name') { ... }.",
+            )
+            self._skip_statement()
+            return
+        self._advance()  # '{'
+        self._scope.append(f"{label_kind} '{name}'")
+        try:
+            self._diagnose_stage_sections(name)
+        finally:
+            self._scope.pop()
+
+    # ---- non-destructive token scans -----------------------------------
+
+    def _skip_nl_from(self, index: int) -> int:
+        while (
+            index < len(self._tokens)
+            and self._tokens[index].kind in (NEWLINE, SEMI)
+        ):
+            index += 1
+        return index
+
+    def _block_start_index(self) -> int | None:
+        """Index of the next '{' after optional arguments, without consuming."""
+        index = self._skip_nl_from(self._pos)
+        if index < len(self._tokens) and self._tokens[index].kind == LPAREN:
+            depth = 0
+            while index < len(self._tokens):
+                kind = self._tokens[index].kind
+                if kind == LPAREN:
+                    depth += 1
+                elif kind == RPAREN:
+                    depth -= 1
+                    if depth == 0:
+                        index += 1
+                        break
+                index += 1
+            index = self._skip_nl_from(index)
+        if index < len(self._tokens) and self._tokens[index].kind == LBRACE:
+            return index
+        return None
+
+    def _scan_parallel_branch_names(self) -> list[str]:
+        start = self._block_start_index()
+        if start is None:
+            return []
+        names: list[str] = []
+        depth = 0
+        index = start
+        while index < len(self._tokens):
+            tok = self._tokens[index]
+            if tok.kind == LBRACE:
+                depth += 1
+            elif tok.kind == RBRACE:
+                depth -= 1
+                if depth == 0:
+                    break
+            elif depth == 1 and tok.kind == IDENT and tok.value == "stage":
+                name_index = self._skip_nl_from(index + 1)
+                if (
+                    name_index < len(self._tokens)
+                    and self._tokens[name_index].kind == LPAREN
+                ):
+                    name_index = self._skip_nl_from(name_index + 1)
+                    if (
+                        name_index < len(self._tokens)
+                        and self._tokens[name_index].kind in STRING_KINDS
+                    ):
+                        tok_name = self._tokens[name_index]
+                        decoded = decode_string(
+                            tok_name.value, tok_name.kind, tok_name.line, tok_name.col
+                        )
+                        if not decoded.has_interpolation:
+                            names.append(decoded.value)
+            index += 1
+        return names
+
+    def _scan_matrix_axis_names(self) -> list[str]:
+        start = self._block_start_index()
+        if start is None:
+            return []
+        names: list[str] = []
+        depth = 0
+        index = start
+        while index < len(self._tokens):
+            tok = self._tokens[index]
+            if tok.kind == LBRACE:
+                depth += 1
+            elif tok.kind == RBRACE:
+                depth -= 1
+                if depth == 0:
+                    break
+            elif (
+                depth == 1
+                and tok.kind == IDENT
+                and tok.value == "axes"
+            ):
+                axes_start = self._skip_nl_from(index + 1)
+                if (
+                    axes_start < len(self._tokens)
+                    and self._tokens[axes_start].kind == LBRACE
+                ):
+                    axes_depth = 0
+                    cursor = axes_start
+                    while cursor < len(self._tokens):
+                        inner = self._tokens[cursor]
+                        if inner.kind == LBRACE:
+                            axes_depth += 1
+                        elif inner.kind == RBRACE:
+                            axes_depth -= 1
+                            if axes_depth == 0:
+                                break
+                        elif (
+                            axes_depth == 2
+                            and inner.kind == IDENT
+                            and inner.value == "name"
+                        ):
+                            value_index = self._skip_nl_from(cursor + 1)
+                            if (
+                                value_index < len(self._tokens)
+                                and self._tokens[value_index].kind in STRING_KINDS
+                            ):
+                                tok_name = self._tokens[value_index]
+                                decoded = decode_string(
+                                    tok_name.value,
+                                    tok_name.kind,
+                                    tok_name.line,
+                                    tok_name.col,
+                                )
+                                if not decoded.has_interpolation:
+                                    names.append(decoded.value)
+                        cursor += 1
+                    index = cursor
+            index += 1
+        return names
+
+    def _step_has_closure(self) -> bool:
+        """Whether the step at the current position is followed by a closure."""
+        index = self._skip_nl_from(self._pos)
+        if index < len(self._tokens) and self._tokens[index].kind == LPAREN:
+            depth = 0
+            while index < len(self._tokens):
+                kind = self._tokens[index].kind
+                if kind == LPAREN:
+                    depth += 1
+                elif kind == RPAREN:
+                    depth -= 1
+                    if depth == 0:
+                        index += 1
+                        break
+                index += 1
+            index = self._skip_nl_from(index)
+        elif (
+            index < len(self._tokens)
+            and self._tokens[index].kind in STRING_KINDS
+        ):
+            index = self._skip_nl_from(index + 1)
+        elif (
+            index < len(self._tokens)
+            and self._tokens[index].kind == IDENT
+            and self._tokens[index].value == "scm"
+        ):
+            index = self._skip_nl_from(index + 1)
+        return (
+            index < len(self._tokens)
+            and self._tokens[index].kind == LBRACE
+        )
 
 
 def parse(source: str) -> ParseResult:

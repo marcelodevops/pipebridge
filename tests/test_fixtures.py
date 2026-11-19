@@ -190,9 +190,12 @@ def test_terraform_approval_conversion(tmp_path):
 
     report = json.loads((out / "migration-report.json").read_text())
     blockers = {f["code"] for f in report["findings"] if f["severity"] == "blocker"}
-    # The input gate blocks the whole Deploy stage: its steps (including the
-    # interpolated echo) are never traversed, so PB-INPUT is the only blocker.
-    assert blockers == {"PB-INPUT"}
+    # The input gate blocks the Deploy stage. Its steps are not translated,
+    # but the interpolated echo is still diagnosed.
+    assert blockers == {"PB-INPUT", "PB-INTERP"}
+    interp = next(f for f in report["findings"] if f["code"] == "PB-INTERP")
+    assert "BUILD_NUMBER" in interp["message"]
+    assert "stage 'Deploy'" in interp["message"]
     by_code = {f["code"]: f for f in report["findings"]}
     assert (by_code["PB-INPUT"]["line"], by_code["PB-INPUT"]["col"]) == (20, 13)
     jenv = next(f for f in report["findings"] if f["code"] == "PB-JENV")
@@ -220,9 +223,9 @@ def test_k8s_custom_agent_conversion(tmp_path):
 
     report = json.loads((out / "migration-report.json").read_text())
     codes = {f["code"] for f in report["findings"] if f["severity"] == "blocker"}
-    # The custom agent blocks the whole pipeline: stage bodies (including the
-    # script block) are never traversed, so PB-AGENT is the only blocker.
-    assert codes == {"PB-AGENT"}
+    # The custom agent blocks the whole pipeline, but D2 still diagnoses the
+    # script block that used to be invisible; its contents are never entered.
+    assert codes == {"PB-AGENT", "PB-SCRIPT"}
     # The report says the contents were not analyzed.
     md = (out / "migration-report.md").read_text()
     assert "not analyzed" in md or "NOT migrated" in md

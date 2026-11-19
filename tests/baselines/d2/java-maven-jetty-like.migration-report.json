@@ -1,0 +1,146 @@
+{
+  "tool": {
+    "name": "pipebridge",
+    "version": "0.2.0"
+  },
+  "generated_at": "2026-11-18T22:26:02Z",
+  "source": {
+    "path": "docs/compatibility-study/synthetic/java-maven-jetty-like.Jenkinsfile",
+    "sha256": "3902a0f1a7c350ab63dc8145e8124e3fdaff2a3fc7d31655bab2995276615bb4"
+  },
+  "exit_code": 2,
+  "summary": {
+    "blockers": 6,
+    "warnings": 0,
+    "info": 3,
+    "translated_stages": 1,
+    "translated_steps": 0
+  },
+  "findings": [
+    {
+      "code": "PB-ASSUME-SHELL",
+      "severity": "info",
+      "construct": "shell execution environment",
+      "message": "Steps run under 'bash --noprofile --norc -eo pipefail' on GitHub Actions; Jenkins 'sh' uses '/bin/sh -xe'. Shell differences (pipefail, tracing, tool availability) may change behavior.",
+      "line": 6,
+      "col": 1,
+      "suggestion": "Review each command under 'set -eo pipefail' bash semantics."
+    },
+    {
+      "code": "PB-SINGLE-JOB",
+      "severity": "info",
+      "construct": "sequential stages",
+      "message": "All sequential stages are kept in a single GitHub Actions job so filesystem state (the Jenkins executor workspace) is preserved between stages.",
+      "line": 6,
+      "col": 1,
+      "suggestion": "Split into multiple jobs only with explicit needs/ and artifact passing."
+    },
+    {
+      "code": "PB-TRIGGER-MANUAL",
+      "severity": "info",
+      "construct": "workflow trigger",
+      "message": "The generated workflow triggers on workflow_dispatch only.",
+      "line": 6,
+      "col": 1,
+      "suggestion": "Add push/pull_request/schedule triggers deliberately after review."
+    },
+    {
+      "code": "PB-AGENT",
+      "severity": "blocker",
+      "construct": "agent declaration",
+      "message": "'agent none' requires per-stage agents, which are not supported by the MVP.",
+      "line": 7,
+      "col": 3,
+      "suggestion": "Choose the runner deliberately (runs-on) and document tool/network needs."
+    },
+    {
+      "code": "PB-SYNTAX",
+      "severity": "blocker",
+      "construct": "options directive",
+      "message": "The options directive is not supported by the MVP; it changes build behavior and was not migrated.",
+      "line": 8,
+      "col": 3,
+      "suggestion": "Migrate the option deliberately (e.g. timeout via timeout-minutes)."
+    },
+    {
+      "code": "PB-POST",
+      "severity": "blocker",
+      "construct": "post section",
+      "message": "Post actions are not supported by the MVP; their steps were not extracted.",
+      "line": 42,
+      "col": 3,
+      "suggestion": "Translate post conditions to job-level steps with explicit conditions."
+    },
+    {
+      "code": "PB-GROOVY-POSTLUDE",
+      "severity": "blocker",
+      "construct": "function definition after the pipeline block",
+      "message": "This Groovy content after the pipeline block is executable; pipebridge does not evaluate or translate it, and calls to it from steps remain unsupported and are reported separately.",
+      "line": 55,
+      "col": 1,
+      "suggestion": "Recreate the needed behavior deliberately in the workflow (a step or a repository script); do not assume this code runs after the migrated pipeline."
+    },
+    {
+      "code": "PB-GROOVY-POSTLUDE",
+      "severity": "blocker",
+      "construct": "function definition after the pipeline block",
+      "message": "This Groovy content after the pipeline block is executable; pipebridge does not evaluate or translate it, and calls to it from steps remain unsupported and are reported separately.",
+      "line": 63,
+      "col": 1,
+      "suggestion": "Recreate the needed behavior deliberately in the workflow (a step or a repository script); do not assume this code runs after the migrated pipeline."
+    },
+    {
+      "code": "PB-GROOVY-POSTLUDE",
+      "severity": "blocker",
+      "construct": "function definition after the pipeline block",
+      "message": "This Groovy content after the pipeline block is executable; pipebridge does not evaluate or translate it, and calls to it from steps remain unsupported and are reported separately.",
+      "line": 67,
+      "col": 1,
+      "suggestion": "Recreate the needed behavior deliberately in the workflow (a step or a repository script); do not assume this code runs after the migrated pipeline."
+    }
+  ],
+  "blockers": [
+    "PB-AGENT",
+    "PB-SYNTAX",
+    "PB-POST",
+    "PB-GROOVY-POSTLUDE",
+    "PB-GROOVY-POSTLUDE",
+    "PB-GROOVY-POSTLUDE"
+  ],
+  "assumptions": [
+    "PB-ASSUME-SHELL",
+    "PB-SINGLE-JOB",
+    "PB-TRIGGER-MANUAL"
+  ],
+  "translated": [
+    {
+      "stage": "Parallel Stage",
+      "source_line": 15,
+      "blocked": true,
+      "steps": []
+    }
+  ],
+  "validation": {
+    "yaml_parse": {
+      "ok": true,
+      "error": null,
+      "note": "yaml.safe_load"
+    },
+    "actionlint": {
+      "available": true,
+      "ok": true,
+      "exit_code": 0,
+      "output": "",
+      "version": "1.7.12",
+      "shellcheck_notes": null,
+      "structural_errors": null,
+      "ignored_rules": [
+        "constant expression \"false\" in condition"
+      ]
+    },
+    "runtime": {
+      "performed": false,
+      "note": "Not performed: pipebridge does not execute generated workflows. YAML parsing and actionlint are static checks only; validate at runtime by dispatching the workflow manually."
+    }
+  }
+}

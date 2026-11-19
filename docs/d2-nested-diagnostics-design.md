@@ -1,9 +1,10 @@
 # D2 design — diagnostic traversal inside blocked scopes
 
-> **Status: planning only.** This document describes a bounded change. It does
-> not implement it, change code, bump the version, or alter any published
+> **Status: implemented.** Diagnostic traversal is in the parser. It does
+> not expand translation eligibility, bump the version, or alter any published
 > release asset. Scope is defect **D2** from
-> [`docs/compatibility-study.md`](compatibility-study.md) §2.
+> [`docs/compatibility-study.md`](compatibility-study.md) §2. Acceptance is
+> `tests/test_diagnostics.py`, confirmed green on the implementation PR CI.
 
 ## Problem
 
