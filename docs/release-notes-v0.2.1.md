@@ -39,7 +39,7 @@ report keys were introduced.
 
 The traversal enters only the documented declarative grammar and a bounded
 step-wrapper allowlist (`timeout`, `retry`, `catchError`, `dir`,
-`withEnv`, `wrap`, `withCredentials`). It does not create a translated
+`withEnv`). It does not create a translated
 `Step` or a nested model `Stage` from a blocked scope.
 
 ### Step arguments are validated in blocked scopes
@@ -74,11 +74,11 @@ bodies stay opaque.
 ### Explicit boundaries and depth limit
 
 Opaque bodies are reported once as boundaries and are never entered:
-`script`, shared-library calls, agent internals, `when` expressions,
-`post`, `withCredentials`, and unknown closures. Traversal stops at nesting
-depth 20 and emits an explicit truncation finding; deeper content is
-reported as not analyzed. These boundaries are unchanged from the D2
-design.
+`script`, shared-library calls, `withCredentials`, agent internals, `when`
+expressions, `post`, and unknown closures (including `wrap`). Traversal
+stops at nesting depth 20 and emits an explicit truncation finding; deeper
+content is reported as not analyzed. These boundaries are unchanged from
+the D2 design.
 
 ### Jetty-like before and after
 
