@@ -132,6 +132,39 @@ def test_rejected_labels_stay_blocked_and_unmapped(label):
     assert "PB-ASSUME-RUNNER-LABEL" not in [f.code for f in analyze_source(source).findings]
 
 
+@pytest.mark.parametrize(
+    "literal",
+    [
+        r'"\n"',
+        r'"\t"',
+        r'"\r"',
+        r'"nodejs\n"',
+        r'"nodejs\t"',
+        r'"nodejs\r"',
+    ],
+)
+def test_double_quoted_control_escapes_stay_blocked(literal, tmp_path):
+    source = _pipeline(f"agent {{ label {literal} }}")
+    result = parse(source)
+    assert result.pipeline.agent_label is None
+    assert result.pipeline.blocked is True
+    assert blocker_codes(result) == ["PB-AGENT"]
+    assert "PB-ASSUME-RUNNER-LABEL" not in [f.code for f in analyze_source(source).findings]
+
+    code, out = _convert(source, tmp_path)
+    assert code == 2
+    workflow = (out / "workflow.yml").read_text()
+    parsed = yaml.safe_load(workflow)
+    job = parsed["jobs"]["migrated-pipeline"]
+    assert job["if"] is False
+    assert job["runs-on"] == "ubuntu-latest"
+    assert "runs-on: [self-hosted," not in workflow
+    report = json.loads((out / "migration-report.json").read_text())
+    assert report["exit_code"] == 2
+    assert "PB-AGENT" in report["blockers"]
+    assert "PB-ASSUME-RUNNER-LABEL" not in report["assumptions"]
+
+
 def test_escaped_quote_backslash_and_control_are_rejected_after_decode():
     cases = [
         r"agent { label 'a\'b' }",

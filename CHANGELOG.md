@@ -13,7 +13,8 @@ exists or matches the Jenkins agent's OS, tools, network, permissions, or
 workspace. actionlint's hosted-runner catalog does not include those custom
 labels; that one unknown-label message is suppressed and disclosed in the
 report, and every other lint failure still rejects the conversion.
-Unsupported agent forms stay blocked. No version bump.
+Unsupported agent forms stay blocked. A decoded trailing newline does
+not satisfy the label grammar. No version bump.
 
 ## [0.2.1] — Alpha (2026-11-19)
 

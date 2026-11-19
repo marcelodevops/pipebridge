@@ -1066,7 +1066,9 @@ class _Parser:
         self._advance()  # '}'
 
         value = decoded.value or ""
-        if not _LABEL_RE.match(value):
+        # fullmatch, not match: `$` also matches before a trailing newline,
+        # so a decoded "nodejs\n" would otherwise pass the bounded grammar.
+        if not _LABEL_RE.fullmatch(value):
             reject(
                 f"Agent label '{value}' is outside the supported label grammar "
                 "(letters, digits, '_', '.', and '-' only; 1-64 characters)."
