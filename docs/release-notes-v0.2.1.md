@@ -134,8 +134,8 @@ instructions remain valid until v0.2.1 is released.
 - Package build: wheel and sdist built from the release-preparation tree;
   `twine check` **PASSED** for both.
 - Fresh-environment installation, one new venv per artifact, outside the
-  checkout, with `PYTHONPATH` unset: **20/20 checks passed for the wheel
-  and 20/20 for the sdist**, covering:
+  checkout, with `PYTHONPATH` unset: **21/21 checks passed for the wheel
+  and 21/21 for the sdist**, covering:
   - `pipebridge --version` → `pipebridge 0.2.1`, import resolving inside
     the venv;
   - supported declarative input → exit 0, enabled workflow, no blockers;
@@ -196,7 +196,7 @@ Prepared and verified locally:
 - [x] Full suite, actionlint, and example validation green.
 - [x] Wheel and sdist built; `twine check` passed.
 - [x] Fresh wheel and sdist venvs outside the checkout, `PYTHONPATH`
-      unset: 20/20 checks each.
+      unset: 21/21 checks each.
 
 Deliberately **not** done in this increment:
 
