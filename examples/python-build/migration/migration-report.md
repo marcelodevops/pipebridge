@@ -1,8 +1,8 @@
 # Migration report
 
 - **Source:** `examples/python-build/Jenkinsfile` (sha256 `7c680aa3e5b21c16f444f95d4817d5877b163556ebb71c468e52c5403666a354`)
-- **Tool:** pipebridge 0.2.0
-- **Generated:** 2026-11-18T17:19:27Z
+- **Tool:** pipebridge 0.2.1
+- **Generated:** 2026-11-19T01:36:59Z
 - **Result:** converted without blockers (review assumptions below)
 - **Exit code:** 0
 

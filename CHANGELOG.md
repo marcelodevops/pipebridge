@@ -4,16 +4,64 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.1] — Alpha (2026-11-18)
 
-Diagnostic traversal inside blocked scopes (defect D2). Findings in those
-scopes are a migration checklist, not translated behavior. `sh`, `echo`,
-and `checkout` arguments are validated there too: interpolation, dynamic
-expressions, and unsupported checkout forms are reported, not translated.
-Argument recovery stops at a top-level semicolon, so a later sibling on
-the same line is still reported.
-Exit codes, disabled drafts, and the supported subset are unchanged. No
-version bump.
+**Diagnostic completeness inside blocked scopes (defect D2), not broader
+conversion support.** When translation stops at a blocker, pipebridge now
+keeps reading the declarative constructs it can still see and reports them
+as additional findings. Findings in a blocked scope remain a migration
+checklist: they are never translated behavior. The supported translation
+subset, exit codes, disabled drafts, finding JSON keys, and report schema
+are unchanged, and Groovy is still never evaluated.
+
+The deeper traversal covers the blocking construct's eligible body and the
+remaining siblings in the same scope, with parent-scope labels, stable
+source ordering, deduplication, and an explicit depth limit (20). It enters
+only the documented declarative grammar and a bounded step-wrapper
+allowlist. Opaque bodies — `script`, shared-library calls, agent internals,
+`when` expressions, `post`, `withCredentials`, and unknown closures — are
+reported once as boundaries and are never entered, so no translated `Step`
+or nested model `Stage` is created from a blocked scope.
+
+Supported step arguments are validated inside blocked scopes too:
+interpolation, dynamic expressions, and unsupported `checkout` forms are
+reported rather than assumed safe. Diagnostic argument recovery stops at a
+top-level semicolon, so a later sibling on the same line is still analyzed
+and reported. Opaque bodies stay opaque.
+
+### Added
+
+- Diagnostic traversal inside blocked stage and pipeline scopes, including
+  `parallel` branches, `matrix` stages, nested `stages`, agents, `when`,
+  `options`, `tools`, `input`, `post`, environment values, and unsupported
+  steps.
+- Branch and axis names in `PB-PARALLEL` and `PB-MATRIX` messages where the
+  declarative names are statically readable.
+- A depth-limit finding when diagnostic traversal stops at nesting depth 20;
+  deeper content is explicitly reported as not analyzed.
+
+### Fixed
+
+- `sh`, `echo`, and `checkout` arguments in blocked scopes were treated as
+  safe from the step name alone. They now reuse the supported-subset checks,
+  so interpolation, dynamic Groovy expressions, and non-`checkout scm` forms
+  are reported without translating anything.
+- Blocked-scope argument recovery consumed the rest of the line, hiding a
+  later sibling after a top-level `;`. Recovery now stops at that semicolon
+  while leaving shared statement recovery unchanged; semicolons inside
+  strings, parentheses, brackets, and closures are not split points.
+- Diagnostic `sh` argument consumption no longer leaves the parser
+  misaligned and emitting cascading false findings for later tokens.
+
+### Known limitations
+
+- Diagnostics are best-effort within the documented declarative grammar.
+  Opaque bodies are boundaries, not analyzed code, and diagnostic traversal
+  stops at depth 20 (reported explicitly).
+- No construct newly visible in a blocked scope is translated; the draft
+  stays disabled and the exit code stays 2.
+- No Groovy is evaluated, no initializer is classified as safe, and no
+  Jenkins-to-GitHub runtime equivalence is claimed.
 
 ## [0.2.0] — Alpha (2026-11-18)
 
@@ -140,3 +188,4 @@ never approximated. Published as a GitHub pre-release:
 
 [0.1.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0
 [0.2.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.0
+[0.2.1]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.1
