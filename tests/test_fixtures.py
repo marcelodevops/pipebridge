@@ -11,6 +11,7 @@ from pipebridge.cli import main
 FIXTURES = {
     "build-and-test": 0,
     "no-explicit-checkout": 0,
+    "agent-label": 0,
     "container-credentials": 2,
     "terraform-approval": 2,
     "k8s-custom-agent": 2,

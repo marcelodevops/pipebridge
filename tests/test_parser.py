@@ -141,10 +141,12 @@ def test_docker_agent_is_blocker_with_position():
     assert result.pipeline.blocked is True
 
 
-def test_label_agent_is_blocker():
+def test_pipeline_label_agent_is_accepted():
     source = "pipeline {\n    agent { label 'linux' }\n    stages {\n        stage('A') {\n            steps {\n                echo 'x'\n            }\n        }\n    }\n}\n"
     result = parse(source)
-    assert blocker_codes(result) == [F.PB_AGENT]
+    assert blocker_codes(result) == []
+    assert result.pipeline.agent_label == "linux"
+    assert result.pipeline.blocked is False
 
 
 def test_stage_level_docker_agent_blocks_only_that_stage():

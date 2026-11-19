@@ -29,6 +29,7 @@ PB_JENV = "PB-JENV"
 PB_GHEXPR = "PB-GHEXPR"
 PB_SHELLCHECK = "PB-SHELLCHECK"
 PB_ASSUME_RUNNER = "PB-ASSUME-RUNNER"
+PB_ASSUME_RUNNER_LABEL = "PB-ASSUME-RUNNER-LABEL"
 PB_ASSUME_CHECKOUT = "PB-ASSUME-CHECKOUT"
 PB_ASSUME_SHELL = "PB-ASSUME-SHELL"
 PB_TRIGGER_MANUAL = "PB-TRIGGER-MANUAL"
@@ -43,7 +44,7 @@ REGISTRY: dict[str, tuple[str, str]] = {
     PB_CRED: (SEVERITY_BLOCKER, "Credentials or credential bindings"),
     PB_PARALLEL: (SEVERITY_BLOCKER, "Parallel execution"),
     PB_MATRIX: (SEVERITY_BLOCKER, "Matrix execution"),
-    PB_AGENT: (SEVERITY_BLOCKER, "Custom, Docker, Kubernetes, or labeled agent"),
+    PB_AGENT: (SEVERITY_BLOCKER, "Unsupported agent declaration"),
     PB_TOOLS: (SEVERITY_BLOCKER, "Tools declaration"),
     PB_WHEN: (SEVERITY_BLOCKER, "Stage conditions (when)"),
     PB_PARAM: (SEVERITY_BLOCKER, "Parameters directive"),
@@ -57,6 +58,7 @@ REGISTRY: dict[str, tuple[str, str]] = {
     PB_GHEXPR: (SEVERITY_WARNING, "GitHub expression syntax in source literal"),
     PB_SHELLCHECK: (SEVERITY_WARNING, "shellcheck note about the migrated shell script"),
     PB_ASSUME_RUNNER: (SEVERITY_INFO, "Runner assumed ubuntu-latest"),
+    PB_ASSUME_RUNNER_LABEL: (SEVERITY_INFO, "Jenkins agent label mapped to a self-hosted runner label"),
     PB_ASSUME_CHECKOUT: (SEVERITY_INFO, "checkout scm assumed to run in the migrated repository"),
     PB_ASSUME_SHELL: (SEVERITY_INFO, "Shell and execution-environment differences"),
     PB_TRIGGER_MANUAL: (SEVERITY_INFO, "Workflow triggers on workflow_dispatch only"),

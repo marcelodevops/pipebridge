@@ -9,6 +9,7 @@ from .findings import (
     Finding,
     PB_ASSUME_CHECKOUT,
     PB_ASSUME_RUNNER,
+    PB_ASSUME_RUNNER_LABEL,
     PB_ASSUME_SHELL,
     PB_GHEXPR,
     PB_JENV,
@@ -153,6 +154,31 @@ def _standard_assumptions(pipeline: Pipeline) -> list[Finding]:
                 line=span.line,
                 col=span.col,
                 suggestion="Verify the runner image provides every tool the commands need.",
+            )
+        )
+    if pipeline.agent_label is not None:
+        span = pipeline.agent_label_span or base
+        label = pipeline.agent_label
+        out.append(
+            Finding(
+                code=PB_ASSUME_RUNNER_LABEL,
+                severity="info",
+                construct="agent label",
+                message=(
+                    f"Jenkins agent label '{label}' was mapped to "
+                    f"runs-on: [self-hosted, {label}]. This assumes a "
+                    f"self-hosted GitHub Actions runner with label '{label}' "
+                    "exists and provides the same OS, installed tools, network "
+                    "access, permissions, and workspace behavior as the Jenkins "
+                    "agent. Jenkins label expressions, variables, and stage-level "
+                    "agents are not mapped."
+                ),
+                line=span.line,
+                col=span.col,
+                suggestion=(
+                    "Verify a self-hosted runner with this label exists and "
+                    "matches the Jenkins agent before enabling the workflow."
+                ),
             )
         )
     return out
