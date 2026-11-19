@@ -4,7 +4,7 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.2.1] — Alpha (2026-11-18)
+## [0.2.1] — Alpha (2026-11-19)
 
 **Diagnostic completeness inside blocked scopes (defect D2), not broader
 conversion support.** When translation stops at a blocker, pipebridge now
@@ -28,6 +28,9 @@ interpolation, dynamic expressions, and unsupported `checkout` forms are
 reported rather than assumed safe. Diagnostic argument recovery stops at a
 top-level semicolon, so a later sibling on the same line is still analyzed
 and reported. Opaque bodies stay opaque.
+
+Published as an alpha prerelease:
+<https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.1>.
 
 ### Added
 

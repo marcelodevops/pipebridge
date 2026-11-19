@@ -1,17 +1,23 @@
 # Release notes — pipebridge v0.2.1 (ALPHA)
 
-> **Status: release preparation, not published.** These notes describe a
-> prepared alpha increment. No `v0.2.1` tag, GitHub release, or release
-> asset exists yet; the published `v0.2.0` assets, tag, and notes are
-> unchanged. The exact release-preparation commit, CI runs, installation
-> results, and independent checks are recorded in the release-preparation
-> pull request.
+> **Status: published alpha prerelease, 2026-11-19.** Published at
+> <https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.1>
+> (annotated tag `v0.2.1` at commit `242af4ac5ce284a2b5e819349ac3092927f0012a`), marked **alpha
+> (pre-release)** and deliberately **not** latest stable. The wheel,
+> source distribution, and `SHA256SUMS` are attached to the release.
+> pipebridge is **not** published to PyPI.
 >
-> The implementation increment for diagnostic traversal is pull request
+> Release-preparation pull request
+> [#16](https://github.com/marcelodevops/pipebridge/pull/16) merged at
+> `242af4ac5ce284a2b5e819349ac3092927f0012a`; all four required CI checks passed on that exact commit:
+> <https://github.com/marcelodevops/pipebridge/actions/runs/44439897813>.
+> The implementation increment is pull request
 > [#15](https://github.com/marcelodevops/pipebridge/pull/15), merged at
-> `ba5b583e26bac7bf01fe7987a8046bb0c7dc13e9`. All four required CI checks
-> passed on that exact merge commit:
+> `ba5b583e26bac7bf01fe7987a8046bb0c7dc13e9` with all four checks green:
 > <https://github.com/marcelodevops/pipebridge/actions/runs/44431519477>.
+>
+> Independent verification of the published assets is recorded in
+> [`docs/release-verification-v0.2.1.md`](release-verification-v0.2.1.md).
 
 ## What v0.2.1 is
 
@@ -108,13 +114,20 @@ subset. Missing required structure remains malformed input (exit 1).
 Requires Python 3.10+ (CI tests 3.10 and 3.13). Runtime dependency:
 PyYAML >= 6.0. `actionlint` is optional and reported honestly when absent.
 
-When published, the expected attached assets are:
+The published release attaches:
 
 - `pipebridge-0.2.1-py3-none-any.whl`
 - `pipebridge-0.2.1.tar.gz`
+- `SHA256SUMS`
 
-pipebridge is not published to PyPI. The published v0.2.0 installation
-instructions remain valid until v0.2.1 is released.
+```sh
+pip install https://github.com/marcelodevops/pipebridge/releases/download/v0.2.1/pipebridge-0.2.1-py3-none-any.whl
+# or, for an isolated CLI:
+pipx install https://github.com/marcelodevops/pipebridge/releases/download/v0.2.1/pipebridge-0.2.1-py3-none-any.whl
+```
+
+Verify the download against the attached `SHA256SUMS`. pipebridge is not
+published to PyPI.
 
 ## Verification
 
@@ -147,6 +160,13 @@ instructions remain valid until v0.2.1 is released.
   - Jetty-like nested diagnostics → exit 2, disabled draft, one blocked
     top-level stage, and the documented nested blocker positions;
   - malformed input (two `pipeline` blocks) → exit 1, no artifacts.
+- Published assets were downloaded again from the release and verified
+  against the attached `SHA256SUMS`; the GitHub asset digests match the
+  local hashes below.
+- Post-publication re-test in two new fresh venvs outside the checkout,
+  one per downloaded artifact and with `PYTHONPATH` unset: **wheel 21/21
+  and sdist 21/21**. See
+  [`docs/release-verification-v0.2.1.md`](release-verification-v0.2.1.md).
 
 ## The example artifacts and goldens
 
@@ -184,24 +204,33 @@ the DO400-like golden differs only in the version header.
   the previously recorded live runs of the migrated example workflow. No
   Jenkins runtime was involved and no runtime equivalence is claimed.
 
+## Published assets (SHA-256)
+
+```
+54df0eca28bd30e61c16e9d1a8e18d76336cee8f64c66b61eb5976b2a8943196  pipebridge-0.2.1-py3-none-any.whl
+f5beb62307e80eee4317195c24e1d2e5b29c2b633fc145f4a2c62cb7bf2c647a  pipebridge-0.2.1.tar.gz
+```
+
 ## Release checklist state
 
-Prepared and verified locally:
+Published:
 
 - [x] Version bumped to `0.2.1` (`src/pipebridge/__init__.py`).
 - [x] Changelog entry added; these release notes added.
 - [x] Committed example output, live-workflow version comment, and
       pure-declarative goldens regenerated with 0.2.1.
 - [x] Clean build-and-test golden updated for the version header.
-- [x] Full suite, actionlint, and example validation green.
-- [x] Wheel and sdist built; `twine check` passed.
+- [x] Full suite, actionlint, and example validation green on the
+      release-preparation PR.
+- [x] Release-preparation PR #16 merged at
+      `242af4ac5ce284a2b5e819349ac3092927f0012a`; all four CI checks green on that exact commit.
+- [x] Wheel and sdist built from a clean checkout of that commit;
+      `twine check` passed.
 - [x] Fresh wheel and sdist venvs outside the checkout, `PYTHONPATH`
       unset: 21/21 checks each.
-
-Deliberately **not** done in this increment:
-
-- [ ] Merge the release-preparation PR (human decision).
-- [ ] Tag `v0.2.1`.
-- [ ] Publish a GitHub release or upload artifacts.
-- [ ] Modify or replace any v0.2.0 tag, release, or asset.
-- [ ] Publish to PyPI.
+- [x] Annotated tag `v0.2.1` created at `242af4ac5ce284a2b5e819349ac3092927f0012a`.
+- [x] GitHub prerelease published with wheel, sdist, and `SHA256SUMS`.
+- [x] Published assets downloaded, checksum-verified, and re-tested in two
+      new fresh venvs: wheel 21/21 and sdist 21/21.
+- [x] v0.1.0 and v0.2.0 tags, releases, and assets left untouched.
+- [x] No PyPI publication.
