@@ -109,10 +109,12 @@ def discover_vars(library_map: LibraryMap) -> tuple[list[DiscoveredVar], list[Fi
         with os.scandir(vars_dir) as it:
             entries = sorted(it, key=lambda e: e.name)
         for e in entries:
-            # Directory-entry name only; do not follow symlinks.
+            # Directory-entry name only; never follow/open a symlink here.
+            # Target checks are deferred until a file is reached.
             if e.is_symlink():
-                continue
-            if not e.is_file(follow_symlinks=False) or not e.name.endswith(".groovy"):
+                if not e.name.endswith(".groovy"):
+                    continue
+            elif not e.is_file(follow_symlinks=False) or not e.name.endswith(".groovy"):
                 continue
             name = e.name[: -len(".groovy")]
             if VAR_NAME_RE.fullmatch(name) is None:

@@ -174,5 +174,6 @@ def test_unused_symlink_not_followed(tmp_path, tmp_path_factory):
     m = make_map(tmp_path, {"schema_version": 1, "libraries": {"build-lib": {"path": "build-lib"}}})
     disc, findings = discover_vars(m)
     names = [d.name for d in disc]
-    assert "escaping" not in names
-    assert "dangling" not in names
+    # Discovery lists names without opening targets.
+    assert "escaping" in names
+    assert "dangling" in names

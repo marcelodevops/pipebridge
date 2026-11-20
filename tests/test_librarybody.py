@@ -131,3 +131,91 @@ def test_pending_credentials_stash_unstash(tmp_path):
     assert "stash" in kinds
     assert "unstash" in kinds
     assert all(o.pending for o in r.operations)
+
+
+def test_transactional_zero_ops_on_later_failure(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { sh 'ok'; nope() }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+    assert r.operations == []
+
+
+def test_trailing_after_sh_rejected(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { sh 'ok' 'extra' }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+    assert any("trailing tokens" in f.message for f in r.findings)
+
+
+def test_trailing_after_helper_call_rejected(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { helper() } extra\n")
+    # 'extra' at top level of body; but attached closure/trailing should block
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+
+
+def test_missing_comma_in_call(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { helper('a' 'b') }\ndef helper(String a, String b) { sh 'x' }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+    assert any("missing a comma" in f.message for f in r.findings)
+
+
+def test_trailing_comma_in_call(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { helper('a',) }\ndef helper(String a) { sh 'x' }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+    assert any("trailing comma" in f.message for f in r.findings)
+
+
+def test_missing_closing_paren(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { helper('a' }\ndef helper(String a) { sh 'x' }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+
+
+def test_malformed_nested_definition(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { helper() }\ndef helper(String a,) { sh 'x' }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+    assert any("invalid parameter list" in f.message for f in r.findings)
+
+
+def test_duplicate_vars_across_libraries(tmp_path):
+    (tmp_path / "a" / "vars").mkdir(parents=True)
+    (tmp_path / "b" / "vars").mkdir(parents=True)
+    for name in ("a", "b"):
+        (tmp_path / name / "vars" / "publish.groovy").write_text("def call() { sh 'x' }\n", encoding="utf-8")
+    (tmp_path / "library-map.json").write_text(json.dumps({
+        "schema_version": 1,
+        "libraries": {"a": {"path": "a"}, "b": {"path": "b"}},
+    }), encoding="utf-8")
+    lm = load_library_map(tmp_path / "library-map.json")
+    r = Resolver(lm).resolve("a", "publish", [])
+    assert r.blocked
+    assert any("more than one loaded library" in f.message for f in r.findings)
+
+
+def test_pending_not_executable(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { sh 'ok'\nstash name: 'd', includes: '**'\n}\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert not r.executable
+    assert r.pending
+
+
+def test_containment_root_raises(tmp_path, tmp_path_factory):
+    root, lm = make_lib(tmp_path)
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "publish.groovy").write_text("def call() { sh 'secret' }\n", encoding="utf-8")
+    (root / "vars" / "publish.groovy").symlink_to(outside / "publish.groovy")
+    from pipebridge.librarybody import LibraryResolutionError
+    with pytest.raises(LibraryResolutionError):
+        Resolver(lm).resolve("build-lib", "publish", [])
