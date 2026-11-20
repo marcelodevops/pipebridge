@@ -222,7 +222,7 @@ Anything else, including `if` and `return`, is unsupported. The finding is at th
 
 ## 8. Parameters, substitution, and call order
 
-Call-site arguments are literal strings only. The formal parameter list and the argument list must have the same length. A non-literal argument is `PB-LIB-CALL`: `Library call 'publish' argument 1 is not a literal string.` A count mismatch is `Library call 'publish' passed 1 argument; call() requires 0.`
+Jenkinsfile call arguments must be literal strings. Calls inside library functions may also pass bare in-scope parameters, resolved statically to their original literal values. The formal parameter list and the argument list must have the same length. A non-literal argument is `PB-LIB-CALL`: `Library call 'publish' argument 1 is not a literal string.` An identifier is accepted only when it names an in-scope parameter whose value has already resolved to a literal. Expressions, unknown identifiers, method calls, and Groovy evaluation remain unsupported. A count mismatch is `Library call 'publish' passed 1 argument; call() requires 0.`
 
 Inside a body, a parameter may appear only as:
 
