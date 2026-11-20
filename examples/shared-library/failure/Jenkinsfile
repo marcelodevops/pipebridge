@@ -1,0 +1,17 @@
+@Library('build-lib') _
+pipeline {
+    agent any
+    stages {
+        stage('Fail') {
+            steps {
+                publish()
+            }
+        }
+        stage('Restore') {
+            steps {
+                unstash 'dist'
+                sh 'echo restored'
+            }
+        }
+    }
+}
