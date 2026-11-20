@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import __version__
 from .analysis import analyze_source
+from .credentials import load_credential_map
 from .errors import PipebridgeError
 from .findings import Finding, PB_SHELLCHECK
 from .reporting import build_report, render_json_report, render_markdown_report
@@ -54,6 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_analyze.add_argument(
         "--format", choices=["text", "json"], default="text", help="output format"
     )
+    _add_credential_args(p_analyze)
 
     p_convert = sub.add_parser(
         "convert", help="generate workflow.yml and migration reports"
@@ -67,7 +69,26 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace existing generated files (default: never overwrite)",
     )
+    _add_credential_args(p_convert)
     return parser
+
+
+def _add_credential_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--credential-map",
+        help=(
+            "JSON file mapping Jenkins credential IDs to GitHub secret names. "
+            "Names only; pipebridge never reads secret values."
+        ),
+    )
+    parser.add_argument(
+        "--secrets-ready",
+        action="store_true",
+        help=(
+            "Acknowledge that every secret named by the credential map exists "
+            "in the target repository. Does not read or verify values."
+        ),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,9 +129,21 @@ def _read_source(path_text: str) -> tuple[Path, str]:
 # ---- analyze ------------------------------------------------------------
 
 
+def _load_credential_map(args):
+    path_text = getattr(args, "credential_map", None)
+    if not path_text:
+        return None
+    return load_credential_map(Path(path_text))
+
+
 def _cmd_analyze(args) -> int:
+    credential_map = _load_credential_map(args)
     path, text = _read_source(args.jenkinsfile)
-    analysis = analyze_source(text)
+    analysis = analyze_source(
+        text,
+        credential_map=credential_map,
+        secrets_ready=bool(args.secrets_ready),
+    )
     report = build_report(analysis, source_path=str(path), validation=None)
     if args.format == "json":
         sys.stdout.write(render_json_report(report))
@@ -125,8 +158,14 @@ _OUTPUT_FILES = ("workflow.yml", "migration-report.md", "migration-report.json")
 
 
 def _cmd_convert(args) -> int:
+    # Structural map errors must fail before any artifact is written.
+    credential_map = _load_credential_map(args)
     path, text = _read_source(args.jenkinsfile)
-    analysis = analyze_source(text)
+    analysis = analyze_source(
+        text,
+        credential_map=credential_map,
+        secrets_ready=bool(args.secrets_ready),
+    )
     workflow_text = generate_workflow(analysis, source_name=path.name)
 
     output_dir = Path(args.output)

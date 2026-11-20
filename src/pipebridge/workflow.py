@@ -13,7 +13,8 @@ import re
 
 from . import __version__
 from .analysis import AnalysisResult, models_implicit_checkout
-from .model import EnvVar, Pipeline, Span, Stage
+from .errors import PipebridgeError
+from .model import STATUS_RESOLVED, CredentialInventory, EnvVar, Pipeline, Span, Stage
 
 # actions/checkout pinned to a verified full commit SHA.
 # v7.0.1 == 3d3c42e5aac5ba805825da76410c181273ba90b1 (verified via
@@ -150,7 +151,7 @@ def generate_workflow(analysis: AnalysisResult, source_name: str = "Jenkinsfile"
         for var in pipeline.env:
             lines.append(f"      {var.name}: {_yaml_scalar(escape_github_expressions(var.value))}")
 
-    steps = _generate_steps(pipeline, blockers)
+    steps = _generate_steps(pipeline, blockers, analysis.credential_inventory)
     if not steps:
         # A job requires a steps section; when nothing was translated
         # (pipeline-level blockers, or no declarative pipeline at all),
@@ -204,7 +205,35 @@ def _checkout_step_lines(name: str) -> list[str]:
     ]
 
 
-def _generate_steps(pipeline: Pipeline, blockers) -> list[str]:
+def _credential_env_lines(step, inventory: CredentialInventory, stage: Stage) -> list[str]:
+    """Step-scoped secret env. Generated expressions are not escaped."""
+    if not step.credential_binding_ids:
+        return []
+    stage_names = {var.name for var in stage.env}
+    lines: list[str] = []
+    for binding_id in step.credential_binding_ids:
+        entry = inventory.by_id(binding_id)
+        if (
+            entry is None
+            or entry.status != STATUS_RESOLVED
+            or not entry.secret_name
+            or not entry.variable
+        ):
+            raise PipebridgeError(
+                f"internal error: step references credential binding {binding_id!r} "
+                "that is not resolved"
+            )
+        if entry.variable in stage_names:
+            raise PipebridgeError(
+                f"internal error: credential variable {entry.variable!r} collides "
+                "with a stage environment variable"
+            )
+        expression = "${{ secrets." + entry.secret_name + " }}"
+        lines.append(f"          {entry.variable}: {_yaml_scalar(expression)}")
+    return lines
+
+
+def _generate_steps(pipeline: Pipeline, blockers, inventory: CredentialInventory | None = None) -> list[str]:
     steps: list[str] = []
     if models_implicit_checkout(pipeline):
         # Model Jenkins' default SCM checkout: it happens before the first
@@ -226,12 +255,14 @@ def _generate_steps(pipeline: Pipeline, blockers) -> list[str]:
         for idx, step in enumerate(stage.steps, start=1):
             name = stage.name if idx == 1 else f"{stage.name} (step {idx})"
             steps.append(f"      - name: {_yaml_scalar(escape_github_expressions(name))}")
-            if stage.env:
+            cred_lines = _credential_env_lines(step, inventory or CredentialInventory(), stage)
+            if stage.env or cred_lines:
                 steps.append("        env:")
                 for var in stage.env:
                     steps.append(
                         f"          {var.name}: {_yaml_scalar(escape_github_expressions(var.value))}"
                     )
+                steps.extend(cred_lines)
             if step.kind == "checkout":
                 # The step's - name: line was already emitted above.
                 steps.append(
