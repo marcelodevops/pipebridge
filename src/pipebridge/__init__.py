@@ -1,3 +1,3 @@
 """pipebridge: migrate declarative Jenkins pipelines to GitHub Actions workflows."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
