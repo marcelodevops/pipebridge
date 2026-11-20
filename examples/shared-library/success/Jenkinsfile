@@ -1,0 +1,18 @@
+@Library('build-lib') _
+pipeline {
+    agent any
+    stages {
+        stage('Publish') {
+            steps {
+                publish('packaged')
+            }
+        }
+        stage('Restore') {
+            steps {
+                sh 'rm -rf dist'
+                unstash 'dist'
+                sh 'test -f dist/marker.txt && grep -qx packaged dist/marker.txt && test -f dist/seen.txt'
+            }
+        }
+    }
+}
