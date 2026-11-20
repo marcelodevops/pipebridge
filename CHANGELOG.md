@@ -4,17 +4,74 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] — Alpha (2026-11-19)
 
-Pipeline-level literal agent labels (`agent { label 'nodejs' }`) are mapped
-to `runs-on: [self-hosted, nodejs]` and reported as `PB-ASSUME-RUNNER-LABEL`.
-This carries a runner selector only. It does not claim the GitHub runner
-exists or matches the Jenkins agent's OS, tools, network, permissions, or
-workspace. actionlint's hosted-runner catalog does not include those custom
-labels; that one unknown-label message is suppressed and disclosed in the
-report, and every other lint failure still rejects the conversion.
-Unsupported agent forms stay blocked. A decoded trailing newline does
-not satisfy the label grammar. No version bump.
+**Bounded pipeline-level literal agent-label mapping.** A single
+pipeline-level `agent { label '<literal>' }` or `agent { label "<literal>" }`
+is mapped to `runs-on: [self-hosted, <label>]` and reported as
+`PB-ASSUME-RUNNER-LABEL`. This carries a runner **selector** only. It does
+not claim a matching self-hosted runner exists, is online, or has the same
+OS, tools, network, permissions, or workspace behavior as the Jenkins agent.
+`PB-ASSUME-RUNNER` remains the `agent any` → `ubuntu-latest` assumption and
+is not emitted for a label.
+
+The decoded label must match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$` over the
+whole value. `self-hosted` is rejected in any casing. Every other accepted
+spelling is preserved, including labels that look like YAML scalars
+(`true`, `null`, `123`, `1.2`), which stay quoted strings. A decoded
+trailing newline does not satisfy the grammar. Expressions, variables,
+concatenation, triple quotes, the call form, extra directives, `agent none`,
+`node` / `docker` / `dockerfile` / `kubernetes`, and stage-level labels stay
+blocked. An accepted label does not clear unrelated blockers and does not
+make a malformed pipeline valid.
+
+actionlint's hosted-runner catalog does not include custom labels. When a
+labeled `runs-on` list is emitted, that one unknown-label message is
+suppressed and disclosed in the report. Other lint failures still reject
+the conversion. That disclosure is not evidence the runner exists.
+
+The DO400-like synthetic is the one checked-in sample this mapping makes
+clean: exit 2 → 0, enabled job, labeled runner, implicit checkout, and its
+three literal `sh` steps. Memphis, HMRC, and Tutanota get the labeled
+`runs-on` but stay exit 2 because unrelated blockers remain. Couchbase's
+expression label, Jetty, and Kymatio stay `ubuntu-latest` and `PB-AGENT`.
+`agent any` output, including `examples/python-build`, is otherwise
+unchanged apart from this version header.
+
+Not yet published: no `v0.3.0` tag, GitHub release, or release asset exists.
+Published v0.1.0, v0.2.0, and v0.2.1 assets are unchanged.
+
+### Added
+
+- Pipeline-level literal `agent { label '…' }` / `agent { label "…" }` mapped
+  to `runs-on: [self-hosted, label]`.
+- Info finding `PB-ASSUME-RUNNER-LABEL`, attached to the `agent` keyword,
+  stating the runner-selector assumption and that expressions, variables,
+  and stage-level agents are not mapped.
+
+### Changed
+
+- `node-minimal-do400-like` converts cleanly (exit 0) instead of remaining a
+  disabled `PB-AGENT` draft. Its blocked D2 baseline is removed; the
+  pure-declarative golden is the enabled labeled workflow.
+- Memphis, HMRC, and Tutanota drafts show the intended labeled runner while
+  remaining disabled. HMRC and Tutanota keep their stage-level `PB-AGENT`.
+
+### Fixed
+
+- Label validation uses a full match, so a decoded trailing newline cannot
+  pass the bounded grammar. Escaped newline, tab, and carriage return stay
+  blocked.
+
+### Known limitations
+
+- This is a selector mapping, not runtime equivalence. No Jenkins controller
+  and no self-hosted runner are involved.
+- Unsupported agent forms stay blockers. A rejected label leaves `PB-AGENT`,
+  `if: false`, and `runs-on: ubuntu-latest`.
+- A label that looks like a GitHub-hosted runner (`ubuntu-latest`) is still
+  emitted as self-hosted. Edit `runs-on` deliberately if a hosted runner is
+  intended.
 
 ## [0.2.1] — Alpha (2026-11-19)
 
@@ -204,3 +261,4 @@ never approximated. Published as a GitHub pre-release:
 [0.1.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.1.0
 [0.2.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.0
 [0.2.1]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.1
+[0.3.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.3.0
