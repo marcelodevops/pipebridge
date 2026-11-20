@@ -72,9 +72,8 @@ def test_missing_vars(tmp_path):
         load_library_map(m)
 
 
-def test_symlink_escape(tmp_path):
-    import tempfile
-    outside = Path(tempfile.mkdtemp(prefix="pipebridge-outside-"))
+def test_symlink_escape(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
     (outside / "vars").mkdir()
     link = tmp_path / "link"
     link.symlink_to(outside)
