@@ -16,7 +16,8 @@ from .findings import (
     PB_SINGLE_JOB,
     PB_TRIGGER_MANUAL,
 )
-from .model import Pipeline, Span
+from .credentials import CredentialMap, resolve_credentials
+from .model import CredentialInventory, Pipeline, Span
 from .parser import parse
 
 # Jenkins-specific environment variables that have no value on GitHub
@@ -55,22 +56,45 @@ _GH_EXPR = "${{"
 
 
 class AnalysisResult:
-    def __init__(self, findings: list[Finding], pipeline: Pipeline | None, source_sha256: str) -> None:
+    def __init__(
+        self,
+        findings: list[Finding],
+        pipeline: Pipeline | None,
+        source_sha256: str,
+        credential_inventory: CredentialInventory | None = None,
+        credential_map_supplied: bool = False,
+        secrets_ready: bool = False,
+    ) -> None:
         self.findings = findings
         self.pipeline = pipeline
         self.source_sha256 = source_sha256
+        self.credential_inventory = credential_inventory or CredentialInventory()
+        self.credential_map_supplied = credential_map_supplied
+        self.secrets_ready = secrets_ready
 
     @property
     def has_blockers(self) -> bool:
         return any(f.is_blocker for f in self.findings)
 
 
-def analyze_source(source_text: str) -> AnalysisResult:
-    """Parse and analyze a Jenkinsfile, producing ordered findings."""
+def analyze_source(
+    source_text: str,
+    credential_map: CredentialMap | None = None,
+    secrets_ready: bool = False,
+) -> AnalysisResult:
+    """Parse and analyze a Jenkinsfile, producing ordered findings.
+
+    ``credential_map`` contains secret names only. This function never reads
+    a secret value.
+    """
     sha = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
     parsed = parse(source_text)
     findings = list(parsed.findings)
     pipeline = parsed.pipeline
+    inventory = parsed.credential_inventory
+    findings.extend(
+        resolve_credentials(inventory, pipeline, credential_map, secrets_ready)
+    )
 
     if pipeline is not None:
         findings.extend(_standard_assumptions(pipeline))
@@ -78,7 +102,14 @@ def analyze_source(source_text: str) -> AnalysisResult:
 
     findings = _dedupe(findings)
     findings.sort(key=lambda f: (f.line, f.col, f.code))
-    return AnalysisResult(findings=findings, pipeline=pipeline, source_sha256=sha)
+    return AnalysisResult(
+        findings=findings,
+        pipeline=pipeline,
+        source_sha256=sha,
+        credential_inventory=inventory,
+        credential_map_supplied=credential_map is not None,
+        secrets_ready=secrets_ready,
+    )
 
 
 def models_implicit_checkout(pipeline: Pipeline) -> bool:

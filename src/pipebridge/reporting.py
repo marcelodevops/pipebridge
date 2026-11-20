@@ -6,6 +6,7 @@ import datetime
 import json
 
 from . import __version__
+from .model import STATUS_RESOLVED, CredentialInventory
 
 _TRUNCATE = 72
 
@@ -73,8 +74,136 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
         "blockers": [f.code for f in blockers],
         "assumptions": [f.code for f in infos],
         "translated": translated_stages,
+        "credentials": _credentials_section(analysis),
         "validation": validation,
     }
+
+
+def _credentials_section(analysis) -> dict:
+    inventory = getattr(analysis, "credential_inventory", None) or CredentialInventory()
+    bindings = []
+    grouped: dict[str, dict[str, list[str]]] = {}
+    for entry in inventory.entries:
+        bindings.append(
+            {
+                "binding_id": entry.binding_id,
+                "binding_type": entry.binding_type,
+                "credential_id": entry.credential_id,
+                "variable": entry.variable,
+                "secret_name": entry.secret_name,
+                "stage": entry.stage_name,
+                "source_line": entry.span.line,
+                "source_col": entry.span.col,
+                "status": entry.status,
+                "reason": entry.reason,
+            }
+        )
+        if entry.status == STATUS_RESOLVED and entry.secret_name:
+            bucket = grouped.setdefault(
+                entry.secret_name, {"credential_ids": [], "variables": []}
+            )
+            if entry.credential_id and entry.credential_id not in bucket["credential_ids"]:
+                bucket["credential_ids"].append(entry.credential_id)
+            if entry.variable and entry.variable not in bucket["variables"]:
+                bucket["variables"].append(entry.variable)
+    required = sorted(grouped)
+    return {
+        "map_supplied": bool(getattr(analysis, "credential_map_supplied", False)),
+        "setup_acknowledged": bool(getattr(analysis, "secrets_ready", False)),
+        "bindings": bindings,
+        "required_secrets": required,
+        "checklist": [
+            {
+                "secret_name": name,
+                "credential_ids": grouped[name]["credential_ids"],
+                "variables": grouped[name]["variables"],
+            }
+            for name in required
+        ],
+    }
+
+
+def _markdown_credentials(credentials: dict) -> list[str]:
+    bindings = credentials.get("bindings") or []
+    if not bindings:
+        return []
+    lines = [
+        "## Required GitHub Actions secrets",
+        "",
+        "pipebridge never reads, prints, embeds, or invents secret values. It only "
+        "knows the secret names supplied in the mapping file.",
+        "",
+        "| Credential ID | Bound variable | GitHub secret | Status | Reason |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for entry in bindings:
+        lines.append(
+            "| {cid} | {var} | {secret} | {status} | {reason} |".format(
+                cid=_md_cell(entry.get("credential_id")),
+                var=_md_cell(entry.get("variable")),
+                secret=_md_cell(entry.get("secret_name")),
+                status=entry.get("status") or "—",
+                reason=_md_cell(entry.get("reason"), quote=False),
+            )
+        )
+    lines.append("")
+    unresolved = [entry for entry in bindings if entry.get("status") != STATUS_RESOLVED]
+    if unresolved:
+        lines.append(
+            "An explicit credential-ID to secret-name mapping is required for every "
+            "unresolved row. pipebridge does not guess a secret name or emit a "
+            "create command for those rows."
+        )
+        lines.append("")
+    required = credentials.get("required_secrets") or []
+    if required:
+        lines.extend(
+            [
+                "### Create each secret",
+                "",
+                "GitHub UI:",
+                "",
+                "1. Open the target repository on GitHub.",
+                "2. Go to **Settings → Secrets and variables → Actions**.",
+                "3. Select **New repository secret**.",
+                "4. Enter the name **exactly** as shown above.",
+                "5. Enter the value yourself. pipebridge never sees, prints, or stores it.",
+                "6. Select **Add secret**.",
+                "",
+                "`gh` CLI, from a clone of the target repository with `gh auth login` already completed:",
+                "",
+                "```sh",
+            ]
+        )
+        for name in required:
+            lines.append(f"gh secret set {name}")
+        lines.extend(
+            [
+                "# gh prompts for the value; do not pass the value on the command line.",
+                "```",
+                "",
+                "Outside the clone, add `--repo <owner>/<repo>` yourself. pipebridge does not "
+                "guess or invent the repository.",
+                "",
+                "After every secret above exists, re-run the same conversion with the same "
+                "`--credential-map` plus `--secrets-ready`. That flag is an acknowledgement, "
+                "not a verification: pipebridge still does not read or test the secret.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _md_cell(value: str | None, quote: bool = True) -> str:
+    if not value:
+        return "—"
+    text = (
+        value.replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("`", "\\`")
+        .replace("\n", " ")
+    )
+    return f"`{text}`" if quote else text
 
 
 def _finding_dict(f) -> dict:
@@ -148,6 +277,10 @@ def render_markdown_report(report: dict) -> str:
     if not had_stage:
         lines.append("| — | — | — | No declarative pipeline was parsed. |")
     lines.append("")
+
+    cred_lines = _markdown_credentials(report.get("credentials") or {})
+    if cred_lines:
+        lines.extend(cred_lines)
 
     findings = report["findings"]
     for title, severity in (("Blockers", "blocker"), ("Warnings", "warning"), ("Assumptions", "info")):

@@ -4,6 +4,26 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+**Bounded literal `string` credential bindings.** One
+`withCredentials([string(credentialsId: '…', variable: 'NAME')]) { … }`
+in a stage `steps` block can be mapped to a step-scoped
+`NAME: ${{ secrets.MAPPED }}` environment entry. The secret name comes
+only from `--credential-map`. pipebridge does not guess IDs, read secret
+values, invoke `gh`, or change GitHub configuration.
+
+The binding body must be existing supported `sh`, `echo`, and
+`checkout scm` steps. Other binding types, dynamic arguments, nested
+bindings, and opaque bodies stay `PB-CRED`. A resolved map still disables
+the job with `PB-CRED-SETUP` until `--secrets-ready` acknowledges that
+the named secrets exist. That flag is not a verification.
+
+Reports gain an additive `credentials` object and, when a binding is
+present, a "Required GitHub Actions secrets" section. Workflow bytes for
+pipelines without an accepted binding are unchanged. This is not a
+release and does not claim runtime equivalence with Jenkins credentials.
+
 ## [0.3.0] — Alpha (2026-11-20)
 
 **Bounded pipeline-level literal agent-label mapping.** A single

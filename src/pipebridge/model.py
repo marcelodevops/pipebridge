@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .findings import Finding
 
@@ -22,6 +22,15 @@ class EnvVar:
     dollar_spans: tuple[tuple[int, int, int], ...] = ()
 
 
+# Inventory statuses. ``pending`` is parser-internal and never emitted.
+STATUS_PENDING = "pending"
+STATUS_RESOLVED = "resolved"
+STATUS_MISSING_MAPPING = "missing_mapping"
+STATUS_INVALID_SECRET_NAME = "invalid_secret_name"
+STATUS_COLLISION = "collision"
+STATUS_UNSUPPORTED = "unsupported"
+
+
 @dataclass(frozen=True)
 class Step:
     """A translated step. kind is one of 'sh', 'echo', 'checkout'."""
@@ -31,6 +40,51 @@ class Step:
     span: Span
     # (offset_in_text, line, col) of literal '$' characters in text.
     dollar_spans: tuple[tuple[int, int, int], ...] = ()
+    # References into CredentialInventory. Not copies of binding data.
+    credential_binding_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CredentialBinding:
+    """One ``withCredentials`` token discovered in a stage steps block.
+
+    Analysis state, not translated workflow content. Clearing a stage's
+    steps must not drop this record.
+    """
+
+    binding_id: str
+    binding_type: str
+    credential_id: str | None
+    variable: str | None
+    secret_name: str | None
+    status: str
+    reason: str | None
+    stage_name: str
+    span: Span
+
+
+@dataclass
+class CredentialInventory:
+    """Append-only credential records for one analysis, in source order."""
+
+    entries: list[CredentialBinding] = field(default_factory=list)
+
+    def by_id(self, binding_id: str) -> CredentialBinding | None:
+        for entry in self.entries:
+            if entry.binding_id == binding_id:
+                return entry
+        return None
+
+    def append(self, entry: CredentialBinding) -> None:
+        self.entries.append(entry)
+
+    def replace(self, binding_id: str, **changes) -> CredentialBinding:
+        for index, entry in enumerate(self.entries):
+            if entry.binding_id == binding_id:
+                updated = replace(entry, **changes)
+                self.entries[index] = updated
+                return updated
+        raise KeyError(binding_id)
 
 
 @dataclass
@@ -61,6 +115,7 @@ class Pipeline:
 class ParseResult:
     pipeline: Pipeline | None
     findings: list[Finding]
+    credential_inventory: CredentialInventory = field(default_factory=CredentialInventory)
 
     @property
     def has_blockers(self) -> bool:

@@ -4,9 +4,11 @@ Design rules:
 
 - The grammar is deliberately limited. Anything outside it produces a
   blocker finding with a source position — never a guess.
-- Unsupported blocks (``script { }``, ``withCredentials (…) { }``,
-  scripted pipelines, …) are **not traversed**: their contents are skipped
-  by balanced-brace skipping and no commands are extracted from them.
+- Unsupported blocks (``script { }``, unsupported ``withCredentials``
+  forms, scripted pipelines, …) are **not traversed**: their contents are
+  skipped by balanced-brace skipping and no commands are extracted from
+  them. The one exception is an accepted literal ``string`` binding, whose
+  body is parsed provisionally and committed only when every step is supported.
 - Once a stage contains a blocker, none of its steps are translated: the
   enclosing behavior is not preserved, so extracting its commands would
   misrepresent the pipeline.
@@ -25,12 +27,16 @@ Design rules:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, replace
 
+from .credentials import valid_credential_id, valid_variable
 from .errors import MalformedPipelineError
 from .findings import Finding, REGISTRY, PB_AGENT, PB_CRED, PB_ENVVAL, PB_GROOVY_IMPORT, PB_GROOVY_POSTLUDE, PB_GROOVY_PRELUDE, PB_INPUT, PB_INTERP, PB_LIB, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
 from .groovystrings import Decoded, decode_string
 from .lexer import (
     ANNOTATION,
+    COLON,
+    COMMA,
     DOT,
     EOF,
     IDENT,
@@ -49,7 +55,18 @@ from .lexer import (
     STRING_TS,
     tokenize,
 )
-from .model import EnvVar, ParseResult, Pipeline, Span, Stage, Step
+from .model import (
+    STATUS_PENDING,
+    STATUS_UNSUPPORTED,
+    CredentialBinding,
+    CredentialInventory,
+    EnvVar,
+    ParseResult,
+    Pipeline,
+    Span,
+    Stage,
+    Step,
+)
 
 STRING_KINDS = (STRING_SQ, STRING_DQ, STRING_TS, STRING_TD)
 
@@ -59,12 +76,24 @@ _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 # Bounded diagnostic traversal: step wrappers whose closure is a steps list,
 # not opaque Groovy. Only these are entered during diagnosis.
-# ``withCredentials`` is recognized, but its body stays opaque: credentials
-# are never extracted. ``wrap`` is not on the allowlist.
+# ``withCredentials`` is recognized, but it is not a diagnostic wrapper.
+# Unsupported forms stay opaque. An accepted literal ``string`` header is
+# handled only by the translation path's provisional body scan. ``wrap``
+# is not on the allowlist.
 _WRAPPER_STEPS = frozenset(
     {"timeout", "retry", "catchError", "dir", "withEnv"}
 )
 _MAX_DIAGNOSTIC_DEPTH = 20
+
+
+@dataclass(frozen=True)
+class _HeaderMatch:
+    accepted: bool
+    binding_type: str
+    credential_id: str | None
+    variable: str | None
+    body_pos: int | None
+    reason: str
 
 # Keywords that begin a Groovy statement but can never name a type. A prelude
 # statement starting with one of these is arbitrary Groovy (a script), not a
@@ -116,6 +145,8 @@ class _Parser:
         self._scope: list[str] = []
         self._diag_depth = 0
         self.pipeline: Pipeline | None = None
+        self.inventory = CredentialInventory()
+        self._binding_seq = 0
         # Required-structure bookkeeping: which stages parsed a steps
         # section, and which of those sections were non-empty.
         self._saw_stages_section = False
@@ -226,11 +257,37 @@ class _Parser:
                 return
             self._advance()
 
+    def _skip_rejected_credential_tail(self) -> None:
+        """Skip a rejected withCredentials call without translating a detached block.
+
+        ``withCredentials(...); { ... }`` is not a binding body. Skip that
+        closure opaquely so later siblings remain visible, and never turn
+        its statements into Steps.
+        """
+        self._skip_step_tail()
+        saved = self._pos
+        while self._peek().kind in (SEMI, NEWLINE):
+            self._advance()
+        if self._pos != saved and self._peek().kind == LBRACE:
+            self._skip_balanced(LBRACE, RBRACE)
+            return
+        self._pos = saved
+
     def _skip_step_tail(self) -> None:
-        """Skip arguments/blocks that may follow an unsupported step name."""
+        """Skip arguments/blocks that may follow an unsupported step name.
+
+        A closure may start on the next line. Newlines are skipped only so
+        that trailing string/brace tokens are recognized; a following
+        statement name is left for the caller. Semicolons stay put so a
+        later block is not attached to this step.
+        """
         if self._peek().kind == LPAREN:
             self._skip_balanced(LPAREN, RPAREN)
+        while self._peek().kind == NEWLINE:
+            self._advance()
         if self._peek().kind in STRING_KINDS:
+            self._advance()
+        while self._peek().kind == NEWLINE:
             self._advance()
         if self._peek().kind == LBRACE:
             self._skip_balanced(LBRACE, RBRACE)
@@ -250,7 +307,11 @@ class _Parser:
                 depth -= 1
 
     def _mark_stage_blocked(self, stage: Stage) -> None:
-        """A blocked stage translates nothing: discard any collected steps."""
+        """A blocked stage translates nothing: discard any collected steps.
+
+        Credential inventory is analysis state and is intentionally not
+        touched here. Clearing steps must not erase a binding record.
+        """
         stage.blocked = True
         stage.steps.clear()
 
@@ -310,7 +371,11 @@ class _Parser:
             # Scripted pipeline (or arbitrary Groovy): classification
             # unchanged from previous releases. self._findings carries
             # exactly the one PB-SCRIPT blocker; no pipeline was parsed.
-            return ParseResult(pipeline=self.pipeline, findings=self._findings)
+            return ParseResult(
+                pipeline=self.pipeline,
+                findings=self._findings,
+                credential_inventory=self.inventory,
+            )
 
         self._parse_pipeline()
         if self.pipeline is not None:
@@ -331,8 +396,13 @@ class _Parser:
             self._mark_pipeline_blocked()
         # Source order keeps reports and diffs reviewable. The sort is stable,
         # so findings emitted at the same position keep their emission order.
+        self._apply_env_collisions()
         self._findings.sort(key=lambda f: (f.line, f.col, f.code))
-        return ParseResult(pipeline=self.pipeline, findings=self._findings)
+        return ParseResult(
+            pipeline=self.pipeline,
+            findings=self._findings,
+            credential_inventory=self.inventory,
+        )
 
     # ---- surrounding Groovy --------------------------------------------
 
@@ -1600,21 +1670,11 @@ class _Parser:
                 self._diagnose_steps_remainder(stage.name)
                 return
             elif name == "withCredentials":
-                self._add(
-                    PB_CRED,
-                    "withCredentials binding",
-                    f"Stage '{stage.name}' binds credentials; credentials are not "
-                    "migrated automatically. The step body was not analyzed.",
-                    tok.line,
-                    tok.col,
-                    "Create GitHub Actions secrets and reference them explicitly "
-                    "(secrets.<NAME>); rewrite the bound step manually.",
-                )
-                self._mark_stage_blocked(stage)
                 self._advance()
-                self._skip_step_tail()
-                self._diagnose_steps_remainder(stage.name)
-                return
+                self._parse_with_credentials(stage, span)
+                if stage.blocked:
+                    self._diagnose_steps_remainder(stage.name)
+                    return
             else:
                 message = (
                     f"Step '{name}' is not supported by the MVP; the enclosing "
@@ -1639,6 +1699,399 @@ class _Parser:
                     self._skip_step_tail()
                 self._diagnose_steps_remainder(stage.name)
                 return
+
+    _CRED_SUGGESTION = (
+        "Create GitHub Actions secrets and reference them explicitly "
+        "(secrets.<NAME>); rewrite the bound step manually."
+    )
+
+    def _alloc_binding_id(self) -> str:
+        self._binding_seq += 1
+        return f"cred-{self._binding_seq}"
+
+    def _legacy_cred_message(self, stage_name: str) -> str:
+        return (
+            f"Stage '{stage_name}' binds credentials; credentials are not "
+            "migrated automatically. The step body was not analyzed."
+        )
+
+    def _look_ahead_credential_header(self) -> "_HeaderMatch":
+        """Classify a withCredentials header without consuming tokens.
+
+        The name token is already consumed. An accepted match points at the
+        body ``{``; anything else is unsupported and left for opaque skipping.
+        """
+        tokens = self._tokens
+
+        def skip(index: int) -> int:
+            # Newlines are insignificant. Semicolons separate statements and
+            # are not header whitespace; a ';' between tokens or before '{'
+            # rejects the header instead of attaching a detached closure.
+            while index < len(tokens) and tokens[index].kind == NEWLINE:
+                index += 1
+            return min(index, len(tokens) - 1)
+
+        def fail(
+            binding_type: str,
+            reason: str,
+            credential_id: str | None = None,
+            variable: str | None = None,
+        ) -> "_HeaderMatch":
+            return _HeaderMatch(False, binding_type, credential_id, variable, None, reason)
+
+        index = skip(self._pos)
+        if tokens[index].kind != LPAREN:
+            return fail("unknown", "withCredentials call is not the accepted literal string form")
+        index = skip(index + 1)
+        if tokens[index].kind != LBRACKET:
+            return fail("unknown", "withCredentials argument is not a single-element list")
+        index = skip(index + 1)
+        if tokens[index].kind != IDENT:
+            return fail("unknown", "credential binding type is not a literal identifier")
+        binding_type = tokens[index].value
+        index = skip(index + 1)
+        if tokens[index].kind != LPAREN:
+            return fail(binding_type, f"credential binding '{binding_type}' is not a named-argument call")
+        index = skip(index + 1)
+
+        args: dict[str, str] = {}
+        if tokens[index].kind == RPAREN:
+            return fail(binding_type, f"credential binding '{binding_type}' has no arguments")
+        while True:
+            index = skip(index)
+            if tokens[index].kind != IDENT:
+                return fail(binding_type, f"credential binding '{binding_type}' has a non-literal argument")
+            arg_name = tokens[index].value
+            index = skip(index + 1)
+            if tokens[index].kind != COLON:
+                return fail(binding_type, f"credential binding '{binding_type}' is not named arguments")
+            index = skip(index + 1)
+            value = tokens[index]
+            if value.kind not in (STRING_SQ, STRING_DQ):
+                return fail(
+                    binding_type,
+                    f"credential binding '{binding_type}' argument is not a "
+                    "single- or double-quoted literal",
+                )
+            if arg_name in args:
+                return fail(binding_type, f"credential binding '{binding_type}' repeats argument '{arg_name}'")
+            decoded = decode_string(value.value, value.kind, value.line, value.col)
+            if decoded.has_interpolation or decoded.value is None:
+                return fail(binding_type, f"credential binding '{binding_type}' argument '{arg_name}' is dynamic")
+            args[arg_name] = decoded.value
+            index = skip(index + 1)
+            if tokens[index].kind == COMMA:
+                nxt = skip(index + 1)
+                if tokens[nxt].kind == RPAREN:
+                    return fail(binding_type, f"credential binding '{binding_type}' has a trailing comma")
+                index = nxt
+                continue
+            if tokens[index].kind == RPAREN:
+                break
+            return fail(binding_type, f"credential binding '{binding_type}' has unexpected argument syntax")
+
+        index = skip(index + 1)
+        if tokens[index].kind == COMMA:
+            return fail(binding_type, "credential binding list has more than one entry")
+        if tokens[index].kind != RBRACKET:
+            return fail(binding_type, "credential binding list is not closed")
+        index = skip(index + 1)
+        if tokens[index].kind != RPAREN:
+            return fail(binding_type, "withCredentials call is not closed")
+        index = skip(index + 1)
+        if tokens[index].kind != LBRACE:
+            return fail(binding_type, "withCredentials body is missing")
+        if binding_type != "string":
+            return fail(binding_type, f"credential binding type '{binding_type}' is not the accepted string form")
+        if set(args) != {"credentialsId", "variable"}:
+            return fail("string", "string binding must have exactly credentialsId and variable")
+        credential_id = args["credentialsId"]
+        variable = args["variable"]
+        if not valid_credential_id(credential_id):
+            return fail(
+                "string",
+                "credentialsId is empty, has surrounding whitespace, or contains a control character",
+                credential_id,
+                variable,
+            )
+        if not valid_variable(variable):
+            return fail(
+                "string",
+                "variable is not a valid environment name or uses a reserved prefix",
+                credential_id,
+                variable,
+            )
+        return _HeaderMatch(True, "string", credential_id, variable, index, "")
+
+    def _append_binding(
+        self,
+        binding_id: str,
+        binding_type: str,
+        credential_id: str | None,
+        variable: str | None,
+        status: str,
+        reason: str | None,
+        stage_name: str,
+        span: Span,
+    ) -> None:
+        self.inventory.append(
+            CredentialBinding(
+                binding_id=binding_id,
+                binding_type=binding_type,
+                credential_id=credential_id,
+                variable=variable,
+                secret_name=None,
+                status=status,
+                reason=reason,
+                stage_name=stage_name,
+                span=span,
+            )
+        )
+
+    def _parse_with_credentials(self, stage: Stage, span: Span) -> None:
+        """Translate one withCredentials step, or block it without mining an opaque body."""
+        binding_id = self._alloc_binding_id()
+        header = self._look_ahead_credential_header()
+        if not header.accepted or header.body_pos is None or header.variable is None:
+            self._append_binding(
+                binding_id,
+                header.binding_type,
+                None,
+                None,
+                STATUS_UNSUPPORTED,
+                header.reason,
+                stage.name,
+                span,
+            )
+            self._add(
+                PB_CRED,
+                "withCredentials binding",
+                self._legacy_cred_message(stage.name),
+                span.line,
+                span.col,
+                self._CRED_SUGGESTION,
+            )
+            self._mark_stage_blocked(stage)
+            self._skip_rejected_credential_tail()
+            return
+
+        self._pos = header.body_pos
+        self._advance()  # '{'
+        steps, failure = self._scan_credential_body()
+        reason = failure
+        if reason is None and self._variable_collides(stage, header.variable):
+            reason = (
+                f"variable '{header.variable}' collides with an environment "
+                "variable of the same name"
+            )
+        if reason is not None:
+            self._append_binding(
+                binding_id,
+                "string",
+                header.credential_id,
+                header.variable,
+                STATUS_UNSUPPORTED,
+                reason,
+                stage.name,
+                span,
+            )
+            self._add(
+                PB_CRED,
+                "withCredentials binding",
+                f"Stage '{stage.name}' binds credentials; {reason}.",
+                span.line,
+                span.col,
+                self._CRED_SUGGESTION,
+            )
+            self._mark_stage_blocked(stage)
+            return
+
+        stage.steps.extend(
+            replace(step, credential_binding_ids=(binding_id,)) for step in steps
+        )
+        self._append_binding(
+            binding_id,
+            "string",
+            header.credential_id,
+            header.variable,
+            STATUS_PENDING,
+            None,
+            stage.name,
+            span,
+        )
+
+    def _scan_credential_body(self) -> tuple[list[Step], str | None]:
+        """Parse a binding body into a local buffer. Never mutates stage.steps.
+
+        Interpolation is recorded and scanning continues. An unknown, nested,
+        or otherwise opaque step ends the scan; its contents are not mined.
+        """
+        steps: list[Step] = []
+        saw_interp = False
+        interp_kind = "sh"
+        while True:
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind == RBRACE:
+                self._advance()
+                if saw_interp:
+                    return [], f"body contains an interpolated {interp_kind} argument"
+                if not steps:
+                    return [], "body is empty"
+                return steps, None
+            if tok.kind == EOF:
+                return [], "body is unterminated"
+            if tok.kind != IDENT:
+                self._skip_credential_body_remainder()
+                return [], "body contains an unsupported statement"
+            name = tok.value
+            span = Span(tok.line, tok.col)
+            if name not in ("sh", "echo", "checkout"):
+                self._skip_credential_body_remainder()
+                return [], f"body contains unsupported step '{name}'"
+            self._advance()
+            outcome, payload = self._read_body_step(name, span)
+            if outcome == "interp":
+                saw_interp = True
+                interp_kind = name
+                continue
+            if outcome == "bad":
+                self._skip_credential_body_remainder()
+                return [], str(payload)
+            steps.append(payload)
+
+    def _read_body_step(self, name: str, span: Span) -> tuple[str, Step | str | None]:
+        """Consume one supported body step. Does not emit PB-SYNTAX."""
+        if name == "checkout":
+            tok = self._peek()
+            if tok.kind == IDENT and tok.value == "scm":
+                self._advance()
+                return "ok", Step(kind="checkout", text="checkout scm", span=span)
+            return "bad", "body contains an unsupported checkout argument"
+        if name == "echo":
+            tok = self._peek()
+            if tok.kind not in STRING_KINDS:
+                return "bad", "body contains an unsupported echo argument"
+            self._advance()
+            decoded = self._decode_step_string(tok, "echo")
+            if decoded is None:
+                return "interp", None
+            return "ok", Step(
+                kind="echo",
+                text=decoded.value,
+                span=span,
+                dollar_spans=tuple(decoded.dollar_spans),
+            )
+        tok = self._peek()
+        if tok.kind == LPAREN:
+            self._advance()
+            self._skip_newlines()
+            tok = self._peek()
+            if tok.kind not in STRING_KINDS:
+                return "bad", "body contains an unsupported sh argument"
+            self._advance()
+            self._skip_newlines()
+            if self._peek().kind != RPAREN:
+                return "bad", "body contains an unsupported sh argument"
+            self._advance()
+            decoded = self._decode_step_string(tok, "sh")
+            if decoded is None:
+                return "interp", None
+            return "ok", Step(
+                kind="sh",
+                text=decoded.value,
+                span=span,
+                dollar_spans=tuple(decoded.dollar_spans),
+            )
+        if tok.kind in STRING_KINDS:
+            self._advance()
+            decoded = self._decode_step_string(tok, "sh")
+            if decoded is None:
+                return "interp", None
+            return "ok", Step(
+                kind="sh",
+                text=decoded.value,
+                span=span,
+                dollar_spans=tuple(decoded.dollar_spans),
+            )
+        return "bad", "body contains an unsupported sh argument"
+
+    def _skip_credential_body_remainder(self) -> None:
+        """Skip the rest of a binding body, including the closing brace.
+
+        Brace depth keeps nested closures opaque. No findings are emitted.
+        """
+        depth = 0
+        while True:
+            tok = self._advance()
+            if tok.kind == EOF:
+                return
+            if tok.kind == LBRACE:
+                depth += 1
+            elif tok.kind == RBRACE:
+                if depth == 0:
+                    return
+                depth -= 1
+
+    def _variable_collides(self, stage: Stage, variable: str) -> bool:
+        names = {var.name for var in stage.env}
+        if self.pipeline is not None:
+            names.update(var.name for var in self.pipeline.env)
+        return variable in names
+
+    def _stage_for_binding(self, entry: CredentialBinding) -> Stage | None:
+        if self.pipeline is None:
+            return None
+        chosen: Stage | None = None
+        for stage in self.pipeline.stages:
+            if stage.name != entry.stage_name or stage.span.line > entry.span.line:
+                continue
+            if chosen is None or stage.span.line > chosen.span.line:
+                chosen = stage
+        return chosen
+
+    def _apply_env_collisions(self) -> None:
+        """Catch environment sections that appear after a committed binding."""
+        for entry in list(self.inventory.entries):
+            if entry.status != STATUS_PENDING or not entry.variable:
+                continue
+            stage = self._stage_for_binding(entry)
+            if stage is None or not self._variable_collides(stage, entry.variable):
+                continue
+            reason = (
+                f"variable '{entry.variable}' collides with an environment "
+                "variable of the same name"
+            )
+            self.inventory.replace(
+                entry.binding_id,
+                status=STATUS_UNSUPPORTED,
+                secret_name=None,
+                reason=reason,
+            )
+            self._add(
+                PB_CRED,
+                "withCredentials binding",
+                f"Stage '{entry.stage_name}' binds credentials; {reason}.",
+                entry.span.line,
+                entry.span.col,
+                self._CRED_SUGGESTION,
+            )
+            self._mark_stage_blocked(stage)
+
+    def _register_diagnosed_credential(self, stage_name: str, tok) -> None:
+        """Record one unsupported entry. Do not enter the body or resolve it."""
+        header = self._look_ahead_credential_header()
+        self._append_binding(
+            self._alloc_binding_id(),
+            header.binding_type,
+            header.credential_id if header.accepted else None,
+            header.variable if header.accepted else None,
+            STATUS_UNSUPPORTED,
+            "withCredentials was reached only through diagnostic traversal; "
+            "the body was not analyzed and the binding is not resolvable",
+            stage_name,
+            Span(tok.line, tok.col),
+        )
 
     def _parse_sh(self, stage: Stage, span: Span) -> None:
         tok = self._peek()
@@ -2336,6 +2789,7 @@ class _Parser:
             self._skip_step_tail()
             return
         if name == "withCredentials":
+            self._register_diagnosed_credential(stage_name, tok)
             self._add_scoped(
                 PB_CRED,
                 "withCredentials binding",
@@ -2346,7 +2800,7 @@ class _Parser:
                 "Create GitHub Actions secrets and reference them explicitly "
                 "(secrets.<NAME>); rewrite the bound step manually.",
             )
-            self._skip_step_tail()
+            self._skip_rejected_credential_tail()
             return
         message = (
             f"Step '{name}' is not supported by the MVP; the enclosing stage "

@@ -13,6 +13,10 @@ SEVERITY_INFO = "info"
 PB_SCRIPT = "PB-SCRIPT"
 PB_LIB = "PB-LIB"
 PB_CRED = "PB-CRED"
+PB_CRED_MAP = "PB-CRED-MAP"
+PB_CRED_SETUP = "PB-CRED-SETUP"
+PB_CRED_MAP_UNUSED = "PB-CRED-MAP-UNUSED"
+PB_ASSUME_CREDENTIALS = "PB-ASSUME-CREDENTIALS"
 PB_PARALLEL = "PB-PARALLEL"
 PB_MATRIX = "PB-MATRIX"
 PB_AGENT = "PB-AGENT"
@@ -42,6 +46,10 @@ REGISTRY: dict[str, tuple[str, str]] = {
     PB_SCRIPT: (SEVERITY_BLOCKER, "Scripted pipeline syntax or script block"),
     PB_LIB: (SEVERITY_BLOCKER, "Shared library usage"),
     PB_CRED: (SEVERITY_BLOCKER, "Credentials or credential bindings"),
+    PB_CRED_MAP: (SEVERITY_BLOCKER, "Credential ID has no valid explicit secret mapping"),
+    PB_CRED_SETUP: (SEVERITY_BLOCKER, "Mapped secrets have not been acknowledged"),
+    PB_CRED_MAP_UNUSED: (SEVERITY_INFO, "Credential map entry is not referenced"),
+    PB_ASSUME_CREDENTIALS: (SEVERITY_INFO, "User acknowledged mapped secrets; values were not verified"),
     PB_PARALLEL: (SEVERITY_BLOCKER, "Parallel execution"),
     PB_MATRIX: (SEVERITY_BLOCKER, "Matrix execution"),
     PB_AGENT: (SEVERITY_BLOCKER, "Unsupported agent declaration"),
