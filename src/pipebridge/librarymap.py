@@ -55,10 +55,14 @@ def _check_path_segment(segment: str) -> None:
 def _validate_path(raw, base: Path) -> Path:
     if not isinstance(raw, str) or raw == "":
         raise LibraryMapError("library path must be a non-empty string")
-    if "\x00" in raw or any(ord(ch) < 32 for ch in raw):
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
         raise LibraryMapError("library path contains a control character")
     if "\\" in raw:
         raise LibraryMapError("library path must use forward slashes")
+    # Validate raw segments before constructing Path.
+    for segment in raw.split("/"):
+        if segment in ("", ".", ".."):
+            raise LibraryMapError(f"invalid path segment in library map: {segment!r}")
     candidate = Path(raw)
     if candidate.is_absolute():
         raise LibraryMapError("library path must be relative")
@@ -97,8 +101,9 @@ def load_library_map(path: Path) -> LibraryMap:
         raise LibraryMapError("library map must be a JSON object")
     if set(data.keys()) != {"schema_version", "libraries"}:
         raise LibraryMapError("library map top-level keys must be schema_version and libraries")
-    if data["schema_version"] != 1:
-        raise LibraryMapError("library map schema_version must be 1")
+    version = data["schema_version"]
+    if type(version) is not int or version != 1:
+        raise LibraryMapError("library map schema_version must be the integer 1")
     libraries = data["libraries"]
     if not isinstance(libraries, dict):
         raise LibraryMapError("libraries must be a JSON object")

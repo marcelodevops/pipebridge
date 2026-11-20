@@ -73,9 +73,9 @@ def test_missing_vars(tmp_path):
 
 
 def test_symlink_escape(tmp_path):
-    outside = Path("/tmp") / "pipebridge-outside"
-    outside.mkdir(exist_ok=True)
-    (outside / "vars").mkdir(exist_ok=True)
+    import tempfile
+    outside = Path(tempfile.mkdtemp(prefix="pipebridge-outside-"))
+    (outside / "vars").mkdir()
     link = tmp_path / "link"
     link.symlink_to(outside)
     m = make_map(tmp_path, {"schema_version": 1, "libraries": {"build-lib": {"path": "link"}}})
@@ -95,3 +95,62 @@ def test_deterministic_ordering(tmp_path):
     m = make_map(tmp_path, {"schema_version": 1, "libraries": {"b": {"path": "b"}, "a": {"path": "a"}}})
     lm = load_library_map(m)
     assert list(lm.entries.keys()) == ["a", "b"]
+
+def _lib(tmp_path, name="build-lib"):
+    lib = tmp_path / name
+    (lib / "vars").mkdir(parents=True)
+    return lib
+
+@pytest.mark.parametrize("version", [True, False, 1.0, "1", None, 2, 0])
+def test_schema_version_type(tmp_path, version):
+    _lib(tmp_path)
+    m = tmp_path / "m.json"
+    m.write_text(json.dumps({"schema_version": version, "libraries": {}}), encoding="utf-8")
+    with pytest.raises(LibraryMapError):
+        load_library_map(m)
+
+@pytest.mark.parametrize("raw", ["./build-lib", "build-lib/.", "build-lib//", "build-lib/", ".", ".."])
+def test_raw_path_segments(tmp_path, raw):
+    _lib(tmp_path)
+    m = tmp_path / "m.json"
+    m.write_text(json.dumps({"schema_version": 1, "libraries": {"build-lib": {"path": raw}}}), encoding="utf-8")
+    with pytest.raises(LibraryMapError):
+        load_library_map(m)
+
+def test_del_char(tmp_path):
+    _lib(tmp_path)
+    m = tmp_path / "m.json"
+    m.write_text('{"schema_version": 1, "libraries": {"build-lib": {"path": "build-lib\u007f"}}}', encoding="utf-8")
+    with pytest.raises(LibraryMapError):
+        load_library_map(m)
+
+def test_nested_duplicate_keys(tmp_path):
+    _lib(tmp_path)
+    m = tmp_path / "m.json"
+    m.write_text('{"schema_version": 1, "libraries": {"build-lib": {"path": "build-lib", "path": "build-lib"}}}', encoding="utf-8")
+    with pytest.raises(LibraryMapError):
+        load_library_map(m)
+
+def test_invalid_json(tmp_path):
+    m = tmp_path / "m.json"
+    m.write_text("{not json", encoding="utf-8")
+    with pytest.raises(LibraryMapError):
+        load_library_map(m)
+
+def test_unknown_schema_keys(tmp_path):
+    m = tmp_path / "m.json"
+    m.write_text(json.dumps({"schema_version": 1, "libraries": {}, "extra": 1}), encoding="utf-8")
+    with pytest.raises(LibraryMapError):
+        load_library_map(m)
+
+def test_wrong_entry_type(tmp_path):
+    m = tmp_path / "m.json"
+    m.write_text(json.dumps({"schema_version": 1, "libraries": {"build-lib": "build-lib"}}), encoding="utf-8")
+    with pytest.raises(LibraryMapError):
+        load_library_map(m)
+
+def test_map_path_is_directory(tmp_path):
+    d = tmp_path / "dir"
+    d.mkdir()
+    with pytest.raises(LibraryMapError):
+        load_library_map(d)
