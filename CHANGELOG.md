@@ -4,7 +4,7 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — Alpha (2026-11-20)
 
 **Bounded literal `string` credential bindings.** One
 `withCredentials([string(credentialsId: '…', variable: 'NAME')]) { … }`
@@ -17,12 +17,50 @@ The binding body must be existing supported `sh`, `echo`, and
 `checkout scm` steps. Other binding types, dynamic arguments, nested
 bindings, and opaque bodies stay `PB-CRED`. A resolved map still disables
 the job with `PB-CRED-SETUP` until `--secrets-ready` acknowledges that
-the named secrets exist. That flag is not a verification.
+the named secrets exist. That flag is an unverified acknowledgement, not
+a check that the secret exists or that its value matches Jenkins.
 
-Reports gain an additive `credentials` object and, when a binding is
-present, a "Required GitHub Actions secrets" section. Workflow bytes for
-pipelines without an accepted binding are unchanged. This is not a
-release and does not claim runtime equivalence with Jenkins credentials.
+Reports gain an additive `credentials` object (bindings, required secrets,
+and a setup checklist) and, when a binding is present, a "Required GitHub
+Actions secrets" section. The credential inventory is independent of
+translated steps, so it survives stage clearing. Workflow bytes for
+pipelines without an accepted binding are unchanged apart from this
+version header. This is not Jenkins credential runtime equivalence.
+
+Not yet published: no `v0.4.0` tag, GitHub release, or release asset exists.
+Published v0.1.0, v0.2.0, v0.2.1, and v0.3.0 assets are unchanged.
+
+### Added
+
+- One literal `string` binding in `steps`, mapped to a step-scoped
+  `env` entry whose value is `${{ secrets.MAPPED }}`.
+- `--credential-map` (names only) and `--secrets-ready` (unverified
+  acknowledgement, reported as `PB-ASSUME-CREDENTIALS`).
+- Additive `credentials` report object, including an inventory that
+  survives stage clearing.
+- `PB-CRED-MAP`, `PB-CRED-SETUP`, `PB-CRED-MAP-UNUSED`, and
+  `PB-ASSUME-CREDENTIALS`.
+
+### Changed
+
+- A complete map without `--secrets-ready` still exits 2 and disables the
+  draft, but the resolved steps remain available for review.
+- With a complete map and `--secrets-ready`, an otherwise clean pipeline
+  exits 0. The acknowledgement does not verify the secret.
+
+### Fixed
+
+- A semicolon between credential-header tokens, or between the call and
+  the body, is rejected. A detached closure is not translated. Semicolons
+  inside a valid body still separate supported steps.
+
+### Known limitations
+
+- Unsupported credential forms stay blocked. pipebridge does not read
+  secret values, create secrets, or call GitHub.
+- `--secrets-ready` is an acknowledgement, not a verification.
+- No Jenkins controller and no GitHub Actions runner were used. No
+  runtime equivalence is claimed.
 
 ## [0.3.0] — Alpha (2026-11-20)
 
@@ -283,3 +321,4 @@ never approximated. Published as a GitHub pre-release:
 [0.2.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.0
 [0.2.1]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.2.1
 [0.3.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.3.0
+[0.4.0]: https://github.com/marcelodevops/pipebridge/releases/tag/v0.4.0
