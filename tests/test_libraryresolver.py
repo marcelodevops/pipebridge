@@ -113,3 +113,66 @@ def test_braces_in_strings_and_comments_do_not_break(tmp_path):
     )
     var = load_var(root / "vars" / "publish.groovy", root)
     assert var.call is not None
+
+
+def test_params_strict_cases(tmp_path):
+    root = make_lib(tmp_path)
+    cases = [
+        "def call(String a, String b) { sh 'x' }\n",  # valid multiline-ish
+        "def call(String a, def b) { sh 'x' }\n",
+        "def call(String a,, String b) { sh 'x' }\n",
+        "def call(String a,) { sh 'x' }\n",
+        "def call(String a = 'x') { sh 'x' }\n",
+        "def call(int a) { sh 'x' }\n",
+        "def call(String a + b) { sh 'x' }\n",
+    ]
+    valid = [0]
+    for idx, src in enumerate(cases):
+        p = root / "vars" / f"v{idx}.groovy"
+        p.write_text(src, encoding="utf-8")
+        var = load_var(p, root)
+        if idx in valid:
+            assert var.call is not None
+            assert [x.name for x in var.call.params] == ["a", "b"]
+        else:
+            assert any("invalid parameter list" in f.message for f in var.findings)
+
+
+def test_multiline_params(tmp_path):
+    root = make_lib(tmp_path)
+    p = root / "vars" / "publish.groovy"
+    p.write_text("def call(\n  String label,\n  String other\n) { sh 'x' }\n", encoding="utf-8")
+    var = load_var(p, root)
+    assert var.call is not None
+    assert [x.name for x in var.call.params] == ["label", "other"]
+
+
+def test_duplicate_helper_position(tmp_path):
+    root = make_lib(tmp_path)
+    p = root / "vars" / "publish.groovy"
+    p.write_text("def call() { helper() }\ndef helper() { sh 'a' }\ndef helper() { sh 'b' }\n", encoding="utf-8")
+    var = load_var(p, root)
+    dup = [f for f in var.findings if "duplicate definition 'helper'" in f.message]
+    assert len(dup) == 1
+    assert dup[0].line == 3
+
+
+def test_lexer_error_converted(tmp_path):
+    root = make_lib(tmp_path)
+    p = root / "vars" / "publish.groovy"
+    p.write_text("def call() { sh 'unterminated }\n", encoding="utf-8")
+    var = load_var(p, root)
+    assert any(f.code == "PB-LIB-CALL" and "cannot be read" in f.message for f in var.findings)
+
+
+def test_unused_symlink_not_followed(tmp_path, tmp_path_factory):
+    root = make_lib(tmp_path)
+    outside = tmp_path_factory.mktemp("out")
+    (outside / "secret.groovy").write_text("def call() { sh 'secret' }\n", encoding="utf-8")
+    (root / "vars" / "escaping.groovy").symlink_to(outside / "secret.groovy")
+    (root / "vars" / "dangling.groovy").symlink_to(root / "vars" / "nope.groovy")
+    m = make_map(tmp_path, {"schema_version": 1, "libraries": {"build-lib": {"path": "build-lib"}}})
+    disc, findings = discover_vars(m)
+    names = [d.name for d in disc]
+    assert "escaping" not in names
+    assert "dangling" not in names

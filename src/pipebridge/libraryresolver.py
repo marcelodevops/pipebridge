@@ -6,11 +6,12 @@ It reads only reached files, after containment and regular-file checks.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .errors import PipebridgeError
+from .errors import LexError, PipebridgeError
 from .findings import (
     PB_LIB_CALL,
     PB_LIB_MAP_UNUSED,
@@ -104,12 +105,19 @@ def discover_vars(library_map: LibraryMap) -> tuple[list[DiscoveredVar], list[Fi
         vars_dir = entry.root / "vars"
         if not vars_dir.is_dir():
             continue
-        for path in sorted(vars_dir.iterdir(), key=lambda p: p.name):
-            if not path.is_file() or path.suffix != ".groovy":
+        with os.scandir(vars_dir) as it:
+            entries = sorted(it, key=lambda e: e.name)
+        for e in entries:
+            # Directory-entry name only; do not follow symlinks.
+            if e.is_symlink():
                 continue
-            name = path.stem
-            discovered.append(DiscoveredVar(lib_name, name, path))
-            seen.setdefault(name, []).append(path)
+            if not e.is_file(follow_symlinks=False) or not e.name.endswith(".groovy"):
+                continue
+            name = e.name[: -len(".groovy")]
+            if VAR_NAME_RE.fullmatch(name) is None:
+                continue
+            discovered.append(DiscoveredVar(lib_name, name, Path(e.path)))
+            seen.setdefault(name, []).append(Path(e.path))
 
     for name, paths in sorted(seen.items()):
         if name in BUILTIN_STEPS:
@@ -153,37 +161,55 @@ def _resolve_reached(path: Path, root: Path) -> Path:
     return resolved
 
 
-def _parse_params(tokens, i, depth, end_line, end_col):
+def _skip_newlines(tokens, i):
+    n = len(tokens)
+    while i < n and tokens[i].kind in (NEWLINE,):
+        i += 1
+    return i
+
+
+def _parse_params(tokens, i):
+    """Strictly parse a parameter list. Returns (params, index_at_RPAREN_or_None)."""
     params: list[Parameter] = []
-    seen: set[str] = set()
-    if i < len(tokens) and tokens[i].kind == RPAREN:
+    i = _skip_newlines(tokens, i)
+    n = len(tokens)
+    if i < n and tokens[i].kind == RPAREN:
         return params, i
-    while i < len(tokens):
+    while i < n:
+        i = _skip_newlines(tokens, i)
         tok = tokens[i]
         if tok.kind == IDENT and tok.value == "String":
             i += 1
-            if i >= len(tokens) or tokens[i].kind != IDENT:
-                break
+            i = _skip_newlines(tokens, i)
+            if i >= n or tokens[i].kind != IDENT:
+                return params, None
             tok = tokens[i]
         if tok.kind != IDENT:
-            break
+            return params, None
         name = tok.value
-        if name in seen:
-            params.append(Parameter(name, Span(tok.line, tok.col)))
-            break
-        seen.add(name)
+        if VAR_NAME_RE.fullmatch(name) is None:
+            return params, None
         params.append(Parameter(name, Span(tok.line, tok.col)))
         i += 1
-        if i < len(tokens) and tokens[i].kind == COMMA:
+        i = _skip_newlines(tokens, i)
+        if i >= n:
+            return params, None
+        if tokens[i].kind == COMMA:
             i += 1
+            i = _skip_newlines(tokens, i)
+            if i < n and tokens[i].kind == RPAREN:
+                return params, None
             continue
-        break
-    return params, i
+        if tokens[i].kind == RPAREN:
+            return params, i
+        return params, None
+    return params, None
 
 
 def _parse_definitions(tokens: list[Token], path: Path) -> tuple[list[Definition], list[Finding]]:
     definitions: list[Definition] = []
     findings: list[Finding] = []
+    definition_names: set[str] = set()
     i = 0
     n = len(tokens)
     call_count = 0
@@ -244,12 +270,18 @@ def _parse_definitions(tokens: list[Token], path: Path) -> tuple[list[Definition
             )
             continue
         i += 1
-        params, i = _parse_params(tokens, i, 1, name_tok.line, name_tok.col)
-        # find matching close paren
-        while i < n and tokens[i].kind != RPAREN:
-            i += 1
-        if i < n:
-            i += 1
+        params, rparen = _parse_params(tokens, i)
+        if rparen is None:
+            findings.append(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Library file '{path}' is malformed: invalid parameter list for '{name}'.",
+                    name_tok.line,
+                    name_tok.col,
+                )
+            )
+            break
+        i = rparen + 1
         if i >= n or tokens[i].kind != LBRACE:
             findings.append(
                 _finding(
@@ -297,6 +329,17 @@ def _parse_definitions(tokens: list[Token], path: Path) -> tuple[list[Definition
             )
         defn = Definition(name=name, params=tuple(params), span=Span(name_tok.line, name_tok.col))
         definitions.append(defn)
+        if name in definition_names:
+            findings.append(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Library file '{path}' has a duplicate definition '{name}'.",
+                    name_tok.line,
+                    name_tok.col,
+                )
+            )
+        else:
+            definition_names.add(name)
         if name == "call":
             call_count += 1
         i = body_end + 1
@@ -340,7 +383,19 @@ def load_var(path: Path, root: Path, name: str | None = None) -> LibraryVar:
             )
         )
         return var
-    tokens = tokenize(text)
+    try:
+        tokens = tokenize(text)
+    except LexError as exc:
+        var.findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"Library file '{resolved}' cannot be read: {exc}",
+                exc.line,
+                exc.col,
+                construct="library file",
+            )
+        )
+        return var
     defs, findings = _parse_definitions(tokens, resolved)
     var.definitions = defs
     var.findings = findings
