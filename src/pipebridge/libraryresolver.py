@@ -59,6 +59,7 @@ class Definition:
     name: str
     params: tuple[Parameter, ...]
     span: Span
+    body: tuple[Token, ...] = ()
 
 
 @dataclass
@@ -282,6 +283,8 @@ def _parse_definitions(tokens: list[Token], path: Path) -> tuple[list[Definition
             )
             break
         i = rparen + 1
+        while i < n and tokens[i].kind == NEWLINE:
+            i += 1
         if i >= n or tokens[i].kind != LBRACE:
             findings.append(
                 _finding(
@@ -327,7 +330,8 @@ def _parse_definitions(tokens: list[Token], path: Path) -> tuple[list[Definition
                     name_tok.col,
                 )
             )
-        defn = Definition(name=name, params=tuple(params), span=Span(name_tok.line, name_tok.col))
+        body_tokens = tuple(tokens[body_start + 1 : body_end])
+        defn = Definition(name=name, params=tuple(params), span=Span(name_tok.line, name_tok.col), body=body_tokens)
         definitions.append(defn)
         if name in definition_names:
             findings.append(
