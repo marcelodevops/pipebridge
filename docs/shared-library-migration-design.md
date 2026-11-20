@@ -47,7 +47,7 @@ The representative case is `examples/shared-library/success/`:
 
 1. `@Library('build-lib') _` loads only the mapped local directory.
 2. `publish('packaged')` calls `vars/publish.groovy` `call(String label)`.
-3. That `call()` calls the same-file helper `packageSources(label)`.
+3. That `call()` calls the same-file helper `packageSources(label)`. The argument is a bare in-scope parameter, not an expression. §7.2 and §8 require this form and resolve it to the literal `packaged` from `publish('packaged')`. No Groovy is evaluated.
 4. The helper runs a shell step whose only Groovy interpolation is `label`.
 5. `call()` then uses one supported `string` credential binding and runs a shell step that tests the variable without printing it.
 6. `call()` stashes `dist/**`.
@@ -158,7 +158,9 @@ Filename rules, before bodies are parsed:
 - A built-in filename in a loaded library is `PB-LIB-CALL` at line 1 of that file: `Library var 'sh' shadows a built-in step.` The pipeline is marked blocked. The built-in Jenkinsfile step keeps its current parser. The vars file is not called.
 - The same `<name>` in two loaded libraries is `PB-LIB-CALL`: `Library var 'publish' is defined in more than one loaded library: <path1>, <path2>.` Paths are sorted. The pipeline is marked blocked.
 
-A file is parsed only if a reached call names it, or if it is already open while resolving a helper. An unused vars file is not parsed. An unreadable or non-UTF-8 reached file is `PB-LIB-CALL`, not exit `1`: `Library file '<path>' cannot be read: <reason>.`
+A file is parsed only if a reached call names it, or if it is already open while resolving a helper. An unused vars file is not opened, not even to resolve a symlink. Filename checks use the directory entry name only.
+
+Before the first read of a reached file, resolve its path, including every symlink. The resolved path must be a regular file and must stay inside the resolved library root (`Path.relative_to`). Do not open the path until that check passes. A symlink that escapes, a directory, or a path that is not a regular file is exit `1`: `pipebridge: error: library file escapes the library root: <path>.` No workflow, report, or `scripts/` tree is written. The error names the path and does not include the outside file's bytes. An unreadable or non-UTF-8 file that is inside the root is `PB-LIB-CALL`, not exit `1`: `Library file '<path>' cannot be read: <reason>.`
 
 ### 7.1 Definitions
 
@@ -185,7 +187,15 @@ Statements are separated by newlines or semicolons at depth 0. A semicolon insid
 statement := sh-step | echo-step | with-credentials | stash-step | unstash-step | invocation
 ```
 
-`sh` and `echo` accept only the argument forms the Jenkinsfile parser already accepts for those steps (`sh 'cmd'`, `sh "cmd"`, `sh('cmd')`, `sh(script: 'cmd')`, and the echo equivalents). `returnStdout`, `encoding`, and any other key are unsupported. A parameter may appear in that string only as specified in §8.
+`sh` and `echo` accept only the forms `_parse_sh` and `_parse_echo` accept today. Named arguments are not among them.
+
+Supported:
+
+- `sh 'cmd'` and `sh "cmd"`
+- `sh('cmd')` and `sh("cmd")` — one positional string, then `)`
+- `echo 'msg'` and `echo "msg"`
+
+Not supported, and not added by this milestone: `sh(script: 'cmd')`, `sh(label: ...)`, `echo('msg')`, `echo(script: ...)`, `returnStdout`, and `encoding`. `_parse_sh` already rejects named arguments with `PB-SYNTAX` and the message `sh with named arguments (label:, script:) is not supported by the MVP; the enclosing stage was not translated.` `_parse_echo` accepts only a string token; a parenthesis is `PB-SYNTAX`, `echo requires a string argument in the supported subset.` The library parser emits those same codes and messages. It does not treat `script:` as a supported form. A parameter may appear in a supported string only as specified in §8.
 
 `with-credentials` accepts only the header the credential milestone already accepts: one `string(credentialsId: '<literal>', variable: '<NAME>')` element, no nested binding, no interpolation in the id or variable. The body is `statements`, not an arbitrary Jenkins body. An unsupported header is the existing `PB-CRED` finding, the body is not mined, and the opaque-body rule is unchanged. A supported header whose body contains an unsupported statement is `PB-LIB-CALL` at that statement. The binding is still inventoried.
 
@@ -199,11 +209,14 @@ unstash('<literal>')
 `name`, then `includes`, then optional `excludes`, in that order. Any other key, order, or `allowEmpty` is unsupported. The name must `fullmatch` `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`. The globs use §11. A parameter is not a legal stash name, include, or exclude.
 
 ```text
+argument   := string | bare-parameter
 invocation := ident '(' ')'
-invocation := ident '(' string (',' string)* ')'
+invocation := ident '(' argument (',' argument)* ')'
 ```
 
-No named arguments, no closure, no trailing comma. Each argument is a single- or double-quoted literal with no interpolation. The callee is either a helper in the same file or a var name. Argument count must equal the callee's parameter count.
+No named arguments, no closure, no trailing comma. A `string` argument is a single- or double-quoted literal with no interpolation. A `bare-parameter` is an identifier token that exactly matches a parameter of the function being parsed. It is not a string, not an interpolation, and not an expression. The callee is either a helper in the same file or a var name. Argument count must equal the callee's parameter count.
+
+`packageSources(label)` in `examples/shared-library/success/build-lib/vars/publish.groovy` is this form. `label` is the parameter of `call(String label)`. That call is in the grammar. It is not a non-literal argument and it is not evaluated.
 
 Anything else, including `if` and `return`, is unsupported. The finding is at that token. The scanner then reports further unsupported statements in the same function without lowering them, and it does not enter an opaque `script` / unknown closure body. A remainder that is not even a statement boundary is one malformed finding, then that function stops: `Library file '<path>' is malformed: <reason>.` A malformed library file does not become `MalformedPipelineError` for a well-formed Jenkinsfile. Exit code stays `2`.
 
@@ -221,6 +234,8 @@ A parameter in a credential id, credential variable, stash name, include, or exc
 Substitution does not insert the argument value into the script file. Each distinct parameter in one `sh` step gets a positional parameter in order of first appearance, starting at `$1`. The interpolation token is replaced by `$N`. Surrounding characters in the decoded string stay, including quotes the author wrote. pipebridge does not add shell quotes around `$N` and does not rewrite the author's shell quoting.
 
 The value is passed only as a workflow argument, single-quoted with the existing `_single_quote_shell`. A value that contains quotes, spaces, or metacharacters remains one shell word. It is still absent from the script file.
+
+Source-derived values are neutralized against GitHub Actions expression injection before shell quoting: any `${{` sequence in the resolved literal is replaced so it cannot be reinterpreted by the runner as an expression. Shell quoting then applies to the neutralized string. Quotes, spaces, metacharacters, and a literal `${{ secrets.EXAMPLE }}` argument are covered by tests and must survive as one argv token. Generated credential expressions (`${{ secrets.X }}` produced by the credential milestone) are never passed through this path; they remain on the trusted credential emission path and are not neutralized or shell-quoted as data.
 
 `echo` of a library parameter uses the same script-plus-argv rule, not `printf` with the value spliced into `run:`. `echo` of a library literal with no parameter is lowered as today's `echo` step. Jenkinsfile `echo` and `sh` are unchanged.
 
@@ -291,6 +306,8 @@ The workflow already sets `defaults.run.shell: bash`. Library steps still invoke
 
 `--force` covers `workflow.yml`, both reports, and `scripts/`. Without `--force`, an existing file in that set is a refusal, exit `1`, and no partial tree is written. Scripts are written only after the workflow write succeeds. A later failure deletes scripts this run created.
 
+Staging is one handled-failure transaction across workflow, reports, and scripts: all artifacts are staged to unique temp files and previous contents backed up before commit; a handled failure restores previous files byte-for-byte, removes newly introduced outputs, and cleans temp files. `--force` follows the same rollback. Stale scripts from a previous run that this run did not create are not deleted unless `--force` covers them; ownership is tracked per run. Original files are preserved on handled failures. Process-kill between replacements remains a documented non-crash-atomic limit.
+
 A disabled draft (`if: false`) still contains lowered steps when the only blocker is `PB-CRED-SETUP`, and it still contains the scripts those steps reference, so a reviewer can read them. A conversion with no lowered library `sh` and no stash writes no `scripts/` directory.
 
 ## 10. Credentials
@@ -358,6 +375,8 @@ No implicit exclude of `.git` or of SCM metadata. An omitted `excludes` excludes
 - Argument: name.
 - Source directory must exist under `$RUNNER_TEMP/pipebridge-stash/<name>` and must not escape that parent.
 - Copy regular files back onto `$GITHUB_WORKSPACE`, overwriting the same relative paths. A symlink in the stash is exit `2`. A missing source is exit `1`, stderr `pipebridge-unstash: stash not found`.
+
+Before copying, validate every source-relative destination against `$GITHUB_WORKSPACE`: resolve the target path and reject any destination that escapes the workspace, including through an existing parent symlink. No file outside `$GITHUB_WORKSPACE` is read or overwritten. Tests must prove this with a symlinked parent and a `..` destination, showing no outside file is touched.
 
 Cleanup is a pipebridge-owned final step, emitted only when a stash or unstash was lowered:
 
