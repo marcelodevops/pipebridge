@@ -90,6 +90,8 @@ class Finding:
     line: int
     col: int
     suggestion: str
+    source_path: str | None = None
+    call_chain: tuple[str, ...] = ()
 
     @property
     def is_blocker(self) -> bool:

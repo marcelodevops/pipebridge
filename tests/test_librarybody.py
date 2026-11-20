@@ -151,10 +151,18 @@ def test_trailing_after_sh_rejected(tmp_path):
 
 def test_trailing_after_helper_call_rejected(tmp_path):
     root, lm = make_lib(tmp_path)
-    write(root, "publish", "def call() { helper() } extra\n")
-    # 'extra' at top level of body; but attached closure/trailing should block
+    write(root, "publish", "def call() { helper() 'extra' }\n")
     r = Resolver(lm).resolve("build-lib", "publish", [])
     assert r.blocked
+    assert any("trailing tokens" in f.message for f in r.findings)
+
+
+def test_attached_closure_rejected(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { helper() { sh 'inner' } }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert r.blocked
+    assert any("trailing tokens" in f.message for f in r.findings)
 
 
 def test_missing_comma_in_call(tmp_path):
@@ -219,3 +227,51 @@ def test_containment_root_raises(tmp_path, tmp_path_factory):
     from pipebridge.librarybody import LibraryResolutionError
     with pytest.raises(LibraryResolutionError):
         Resolver(lm).resolve("build-lib", "publish", [])
+
+
+def test_identically_named_helpers_provenance(tmp_path):
+    (tmp_path / "a" / "vars").mkdir(parents=True)
+    (tmp_path / "b" / "vars").mkdir(parents=True)
+    (tmp_path / "a" / "vars" / "one.groovy").write_text(
+        "def call() { helper('x') }\ndef helper(String v) { nope() }\n", encoding="utf-8"
+    )
+    (tmp_path / "b" / "vars" / "two.groovy").write_text(
+        "def call() { helper('y') }\ndef helper(String v) { nope() }\n", encoding="utf-8"
+    )
+    (tmp_path / "library-map.json").write_text(json.dumps({
+        "schema_version": 1,
+        "libraries": {"a": {"path": "a"}, "b": {"path": "b"}},
+    }), encoding="utf-8")
+    lm = load_library_map(tmp_path / "library-map.json")
+
+    for lib, var in (("a", "one"), ("b", "two")):
+        r = Resolver(lm).resolve(lib, var, [])
+        assert r.blocked
+        assert r.operations == []
+        f = r.findings[-1]
+        assert f.source_path is not None
+        assert "helper@" in f.call_chain[-1]
+        # chain distinguishes files and call sites, in call order
+        assert len(f.call_chain) >= 2
+        assert f"{var}.groovy:call@" in f.call_chain[0]
+        assert "one.groovy" in f.call_chain[0] or "two.groovy" in f.call_chain[0]
+
+
+def test_missing_definition_provenance(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { nope() }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    f = r.findings[-1]
+    assert f.source_path is not None
+    assert "publish.groovy:call@" in f.call_chain[0]
+    assert any("no definition" in x.message for x in r.findings)
+
+
+def test_recursion_provenance(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() { call() }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    f = [x for x in r.findings if "cycle" in x.message][0]
+    assert f.source_path is not None
+    assert len(f.call_chain) >= 2
+    assert "call@" in f.call_chain[0]

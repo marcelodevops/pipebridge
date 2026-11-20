@@ -70,7 +70,7 @@ class Resolution:
         return not self.blocked and not self.pending
 
 
-def _finding(code, message, line, col, severity="blocker", construct="library body"):
+def _finding(code, message, line, col, severity="blocker", construct="library body", path=None, chain=()):
     return Finding(
         code=code,
         severity=severity,
@@ -79,7 +79,13 @@ def _finding(code, message, line, col, severity="blocker", construct="library bo
         line=line,
         col=col,
         suggestion="Inline the library steps or provide a supported local library.",
+        source_path=str(path) if path is not None else None,
+        call_chain=chain,
     )
+
+
+def _label(path: Path, defn: Definition) -> str:
+    return f"{path}:{defn.name}@{defn.span.line}:{defn.span.col}"
 
 
 class Resolver:
@@ -109,13 +115,13 @@ class Resolver:
         all_candidates = self._candidates(var_name)
         if len(all_candidates) > 1:
             paths = sorted(str(d.path) for d in all_candidates)
-            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1)])
+            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1, path=all_candidates[0].path, chain=(f"{var_name}@1:1",))])
         candidates = [d for d in all_candidates if d.library == lib_name]
         if not candidates:
-            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library '{lib_name}' has no vars/{var_name}.groovy.", 1, 1)])
+            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library '{lib_name}' has no vars/{var_name}.groovy.", 1, 1, chain=(f"{var_name}@1:1",))])
         if len(candidates) > 1:
             paths = sorted(str(d.path) for d in candidates)
-            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1)])
+            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1, path=all_candidates[0].path, chain=(f"{var_name}@1:1",))])
         disc = candidates[0]
         var = self._load(disc.path, self.map.entries[disc.library].root)  # may raise LibraryResolutionError
         res = Resolution()
@@ -127,12 +133,12 @@ class Resolver:
         if call is None:
             res.blocked = True
             res.operations = []
-            res.findings.append(_finding(PB_LIB_CALL, f"Library file '{var.path}' has no call().", 1, 1))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library file '{var.path}' has no call().", 1, 1, path=var.path, chain=(_label(var.path, call) if call else f"{var.path}:call@1:1",)))
             return res
         if len(args) != len(call.params):
             res.blocked = True
             res.operations = []
-            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{var_name}' passed {len(args)} argument(s); call() requires {len(call.params)}.", call.span.line, call.span.col))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{var_name}' passed {len(args)} argument(s); call() requires {len(call.params)}.", call.span.line, call.span.col, path=var.path, chain=(_label(var.path, call),)))
             return res
         self._expand(var, call, args, [], res)
         if res.blocked:
@@ -148,17 +154,19 @@ class Resolver:
     def _expand(self, var, defn, arg_values, stack, res):
         if len(stack) >= LIBRARY_CALL_DEPTH_CAP:
             res.blocked = True
-            res.findings.append(_finding(PB_LIB_CALL, f"Library call depth exceeded {LIBRARY_CALL_DEPTH_CAP} at '{defn.name}'.", defn.span.line, defn.span.col))
+            labels = tuple(_label(pp, dd) for pp, dd in stack) + (_label(var.path, defn),)
+            res.findings.append(_finding(PB_LIB_CALL, f"Library call depth exceeded {LIBRARY_CALL_DEPTH_CAP} at '{defn.name}'.", defn.span.line, defn.span.col, path=var.path, chain=labels))
             return
         for (p, d) in stack:
             if p == var.path and d.name == defn.name:
-                chain = " -> ".join([d.name for _, d in stack] + [defn.name])
+                labels = tuple(_label(pp, dd) for pp, dd in stack) + (_label(var.path, defn),)
+                chain = " -> ".join(labels)
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library call cycle: {chain}.", defn.span.line, defn.span.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library call cycle: {chain}.", defn.span.line, defn.span.col, path=var.path, chain=labels))
                 return
         params = {p.name: v for p, v in zip(defn.params, arg_values)}
-        chain = tuple(d.name for _, d in stack) + (defn.name,)
-        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, chain)
+        labels = tuple(_label(pp, dd) for pp, dd in stack) + (_label(var.path, defn),)
+        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, labels)
 
     def _arg_value(self, tok, params):
         if tok.kind in STRING_KINDS:
@@ -190,7 +198,7 @@ class Resolver:
                 self._do_invocation(first, stmt, var, defn, params, stack, res, chain)
             else:
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Unsupported library statement at line {first.line}: '{first.value}'.", first.line, first.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Unsupported library statement at line {first.line}: '{first.value}'.", first.line, first.col, path=var.path, chain=chain))
 
     def _do_sh_echo(self, which, stmt, params, res, path, chain):
         tok = stmt[0]
@@ -201,20 +209,20 @@ class Resolver:
             idx += 1
         if idx >= len(stmt) or stmt[idx].kind not in STRING_KINDS:
             res.blocked = True
-            res.findings.append(_finding(PB_LIB_CALL, f"{which} requires a string argument in the supported subset.", tok.line, tok.col))
+            res.findings.append(_finding(PB_LIB_CALL, f"{which} requires a string argument in the supported subset.", tok.line, tok.col, path=path, chain=chain))
             return
         if paren:
             idx += 1
             if idx >= len(stmt) or stmt[idx].kind != RPAREN:
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"{which} requires a closing ')' in the supported subset.", tok.line, tok.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"{which} requires a closing ')' in the supported subset.", tok.line, tok.col, path=path, chain=chain))
                 return
             idx += 1
         else:
             idx += 1
         if idx != len(stmt):
             res.blocked = True
-            res.findings.append(_finding(PB_LIB_CALL, f"{which} has unsupported trailing tokens in the supported subset.", tok.line, tok.col))
+            res.findings.append(_finding(PB_LIB_CALL, f"{which} has unsupported trailing tokens in the supported subset.", tok.line, tok.col, path=path, chain=chain))
             return
         dec = decode_string(stmt[1 if not paren else 2].value, stmt[1 if not paren else 2].kind, stmt[1 if not paren else 2].line, stmt[1 if not paren else 2].col)
         bindings: dict[str, str] = {}
@@ -226,7 +234,7 @@ class Resolver:
                 name = raw.lstrip("$").strip()
                 if name not in params:
                     res.blocked = True
-                    res.findings.append(_finding(PB_INTERP, f"Unsupported interpolation in library {which}: '{interp.text}'.", interp.line, interp.col))
+                    res.findings.append(_finding(PB_INTERP, f"Unsupported interpolation in library {which}: '{interp.text}'.", interp.line, interp.col, path=path, chain=chain))
                     return
                 bindings[name] = params[name]
         res.operations.append(Operation(kind=which, text=dec.value if dec.value is not None else stmt[1 if not paren else 2].value, bindings=bindings, span=Span(tok.line, tok.col), path=path, call_chain=chain))
@@ -237,24 +245,24 @@ class Resolver:
         while True:
             if idx >= len(stmt):
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is missing a closing ')'.", name_tok.line, name_tok.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is missing a closing ')'.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
             if stmt[idx].kind == RPAREN:
                 if args:
                     res.blocked = True
-                    res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has a trailing comma.", name_tok.line, name_tok.col))
+                    res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has a trailing comma.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 idx += 1
                 break
             val = self._arg_value(stmt[idx], params)
             if val is None:
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' argument is not a literal string or in-scope parameter.", stmt[idx].line, stmt[idx].col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' argument is not a literal string or in-scope parameter.", stmt[idx].line, stmt[idx].col, path=var.path, chain=chain))
                 return
             args.append(val)
             idx += 1
             if idx >= len(stmt):
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is missing a closing ')'.", name_tok.line, name_tok.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is missing a closing ')'.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
             if stmt[idx].kind == COMMA:
                 idx += 1
@@ -263,23 +271,23 @@ class Resolver:
                 idx += 1
                 break
             res.blocked = True
-            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is missing a comma between arguments.", stmt[idx].line, stmt[idx].col))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is missing a comma between arguments.", stmt[idx].line, stmt[idx].col, path=var.path, chain=chain))
             return
         if idx != len(stmt):
             res.blocked = True
-            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has unsupported trailing tokens.", name_tok.line, name_tok.col))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has unsupported trailing tokens.", name_tok.line, name_tok.col, path=var.path, chain=chain))
             return
 
         helper = next((d for d in var.definitions if d.name == name_tok.value), None)
         candidates = self._candidates(name_tok.value)
         if helper is not None and candidates:
             res.blocked = True
-            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is ambiguous: a helper and a vars file both define it.", name_tok.line, name_tok.col))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' is ambiguous: a helper and a vars file both define it.", name_tok.line, name_tok.col, path=var.path, chain=chain))
             return
         if helper is not None:
             if len(args) != len(helper.params):
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); requires {len(helper.params)}.", name_tok.line, name_tok.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); requires {len(helper.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
             self._expand(var, helper, args, stack, res)
             return
@@ -287,7 +295,7 @@ class Resolver:
             if len(candidates) > 1:
                 paths = sorted(str(d.path) for d in candidates)
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library var '{name_tok.value}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", name_tok.line, name_tok.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library var '{name_tok.value}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
             disc = candidates[0]
             nested = self._load(disc.path, self.map.entries[disc.library].root)  # may raise LibraryResolutionError
@@ -297,16 +305,16 @@ class Resolver:
             call = nested.call
             if call is None:
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library file '{nested.path}' has no call().", name_tok.line, name_tok.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library file '{nested.path}' has no call().", name_tok.line, name_tok.col, path=nested.path, chain=chain))
                 return
             if len(args) != len(call.params):
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); call() requires {len(call.params)}.", name_tok.line, name_tok.col))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); call() requires {len(call.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
             self._expand(nested, call, args, stack, res)
             return
         res.blocked = True
-        res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has no definition.", name_tok.line, name_tok.col))
+        res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has no definition.", name_tok.line, name_tok.col, path=var.path, chain=chain))
 
 
 def _split_statements(tokens):

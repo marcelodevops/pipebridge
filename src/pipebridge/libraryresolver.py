@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .errors import LexError, PipebridgeError
@@ -126,24 +126,30 @@ def discover_vars(library_map: LibraryMap) -> tuple[list[DiscoveredVar], list[Fi
         if name in BUILTIN_STEPS:
             first = paths[0]
             findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library var '{name}' shadows a built-in step.",
-                    line=1,
-                    col=1,
-                    construct="library var",
+                replace(
+                    _finding(
+                        PB_LIB_CALL,
+                        f"Library var '{name}' shadows a built-in step.",
+                        line=1,
+                        col=1,
+                        construct="library var",
+                    ),
+                    source_path=str(paths[0]),
                 )
             )
             continue
         if len(paths) > 1:
             sorted_paths = sorted(str(p) for p in paths)
             findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library var '{name}' is defined in more than one loaded library: {sorted_paths[0]}, {sorted_paths[1]}.",
-                    line=1,
-                    col=1,
-                    construct="library var",
+                replace(
+                    _finding(
+                        PB_LIB_CALL,
+                        f"Library var '{name}' is defined in more than one loaded library: {sorted_paths[0]}, {sorted_paths[1]}.",
+                        line=1,
+                        col=1,
+                        construct="library var",
+                    ),
+                    source_path=str(paths[0]),
                 )
             )
     return discovered, findings
@@ -404,7 +410,7 @@ def load_var(path: Path, root: Path, name: str | None = None) -> LibraryVar:
         return var
     defs, findings = _parse_definitions(tokens, resolved)
     var.definitions = defs
-    var.findings = findings
+    var.findings = [replace(f, source_path=str(resolved)) for f in findings]
     return var
 
 
