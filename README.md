@@ -173,6 +173,10 @@ Every report contains:
 | `PB-SCRIPT` | blocker | Scripted pipeline syntax or `script { }` block |
 | `PB-LIB` | blocker | Shared library usage |
 | `PB-CRED` | blocker | Credentials / credential bindings |
+| `PB-CRED-MAP` | blocker | Credential ID has no valid explicit secret mapping |
+| `PB-CRED-SETUP` | blocker | Mapped secrets have not been acknowledged |
+| `PB-CRED-MAP-UNUSED` | info | Credential map entry is not referenced |
+| `PB-ASSUME-CREDENTIALS` | info | User acknowledged mapped secrets; values were not verified |
 | `PB-PARALLEL` | blocker | `parallel` execution |
 | `PB-MATRIX` | blocker | `matrix` execution |
 | `PB-AGENT` | blocker | Unsupported agent declaration (`agent none`, stage-level agents, node/docker/dockerfile/kubernetes, label expressions, or a label outside the literal grammar) |
@@ -197,6 +201,61 @@ Every report contains:
 | `PB-GROOVY-PRELUDE` | blocker | Executable Groovy before the pipeline block (declarations, annotations, unsupported import forms) |
 | `PB-GROOVY-POSTLUDE` | blocker | Executable Groovy after the pipeline block (helper functions, other statements) |
 | `PB-SINGLE-JOB` | info | All stages kept in one job to preserve workspace state |
+
+## Literal string credential binding
+
+One supported binding, in a stage `steps` block:
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('Publish') {
+            steps {
+                withCredentials([string(credentialsId: 'npm-token', variable: 'NPM_TOKEN')]) {
+                    sh 'npm publish'
+                }
+            }
+        }
+    }
+}
+```
+
+The decoded `variable` must full-match `^[A-Za-z_][A-Za-z0-9_]{0,127}$` and must not start with `GITHUB_` or `RUNNER_` (that check is case-insensitive). The credential ID is matched exactly: non-empty, no leading or trailing whitespace, and no control characters.
+
+Map that ID to a secret name in `credential-map.json`. This is the whole file format:
+
+```json
+{"schema_version":1,"credentials":{"npm-token":{"secret":"NPM_TOKEN_GH"}}}
+```
+
+`schema_version` must be the integer `1`. `credentials` maps each Jenkins credential ID to an object with exactly one member, `secret`. The secret name must full-match `^[A-Z][A-Z0-9_]{0,99}$` and must not start with `GITHUB_` or `RUNNER_`. pipebridge does not guess either name and never reads a secret value.
+
+Convert without acknowledging setup:
+
+```sh
+pipebridge convert Jenkinsfile --output ./migration --credential-map ./credential-map.json
+```
+
+That exits **2**. The job is a disabled review draft (`if: false`, `PB-CRED-SETUP`). The resolved step remains in the draft, with `NPM_TOKEN: ${{ secrets.NPM_TOKEN_GH }}` on that step only. The report lists the secret to create. It does not print a value.
+
+Create the secret yourself. From a clone of the target repository, after `gh auth login`, let `gh` prompt for the value. Do not pass the value on the command line:
+
+```sh
+gh secret set NPM_TOKEN_GH
+```
+
+Outside that clone, add `--repo <owner>/<repo>` yourself. pipebridge does not guess the repository, invoke `gh`, or create the secret.
+
+After the secret exists, replace the draft. `--secrets-ready` is an unverified acknowledgement that the named secret exists. It does not read, list, or test the value:
+
+```sh
+pipebridge convert Jenkinsfile --output ./migration --force \
+  --credential-map ./credential-map.json \
+  --secrets-ready
+```
+
+When the pipeline is otherwise clean, that exits **0** and enables the job. An unsupported credential form stays `PB-CRED` either way.
 
 ## Example migration
 

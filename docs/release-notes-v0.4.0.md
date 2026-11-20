@@ -46,8 +46,10 @@ Exactly one `withCredentials([string(...)]) { … }` whose header is:
 - `credentialsId` and `variable` each exactly once, either order;
 - both values single- or double-quoted literals;
 - the decoded credential ID non-empty, without leading or trailing
-  whitespace;
-- the variable a Jenkins identifier.
+  whitespace, and without control characters; matched exactly;
+- the decoded variable full-matches `^[A-Za-z_][A-Za-z0-9_]{0,127}$` and
+  does not start with `GITHUB_` or `RUNNER_` (that check is
+  case-insensitive).
 
 The body must be only already-supported `sh`, `echo`, and `checkout scm`
 steps. Semicolons inside that body still separate statements. Newlines
@@ -59,16 +61,33 @@ does not pass.
 
 ## Explicit mapping
 
-`--credential-map PATH` loads a JSON object of credential ID → secret name.
-It is accepted by `analyze` and `convert`. Validation rejects a missing
-file, invalid JSON, a non-object, empty or non-string names, and secret
-names that are not GitHub secret-name shaped. Unused map entries are
-reported (`PB-CRED-MAP-UNUSED`) and do not by themselves block conversion.
+`--credential-map PATH` loads this JSON object and nothing else. It is
+accepted by `analyze` and `convert`.
 
-A source credential ID absent from the map, an invalid name, or two
-credential IDs that collide on the same secret name (case-insensitive)
-are `PB-CRED-MAP`. The affected stage stays blocked. No command is emitted
-for that binding.
+```json
+{"schema_version":1,"credentials":{"npm-token":{"secret":"NPM_TOKEN_GH"}}}
+```
+
+- The file has exactly two members: `schema_version` and `credentials`.
+- `schema_version` must be the integer `1`.
+- `credentials` maps each Jenkins credential ID to an object with exactly
+  one member, `secret`, a string.
+- Duplicate member names are rejected. Extra members are errors.
+- Credential IDs are matched exactly. Empty keys, leading or trailing
+  whitespace, and control characters are invalid.
+
+The bound variable must full-match `^[A-Za-z_][A-Za-z0-9_]{0,127}$` and
+must not start with `GITHUB_` or `RUNNER_` (that check is
+case-insensitive). The secret name must full-match
+`^[A-Z][A-Z0-9_]{0,99}$` and must not start with `GITHUB_` or `RUNNER_`.
+Two credential IDs that map to the same secret name, compared
+case-insensitively, collide.
+
+A missing file, invalid JSON, or a structural mismatch exits 1 and writes
+nothing. An unused map entry is `PB-CRED-MAP-UNUSED` and does not by
+itself block conversion. A source ID absent from the map, a secret name
+that fails the rule above, or a collision is `PB-CRED-MAP`. The affected
+stage stays blocked. No command is emitted for that binding.
 
 ## Step-scoped injection
 
