@@ -1,12 +1,19 @@
 # Release notes — pipebridge v0.3.0 (ALPHA)
 
-> **Status: release preparation, not published.** These notes describe a
-> prepared alpha increment. No `v0.3.0` tag, GitHub release, or release
-> asset exists yet; the published `v0.2.1` assets, tag, and notes are
-> unchanged. The exact release-preparation commit, CI runs, installation
-> results, and independent checks are recorded in the release-preparation
-> pull request.
+> **Status: published alpha prerelease, 2026-11-20.** Published at
+> <https://github.com/marcelodevops/pipebridge/releases/tag/v0.3.0>
+> (annotated tag `v0.3.0` at commit `a13a0a00f9eff7e6505f6ade9fd0db40bbd7ca9c`),
+> marked **alpha (pre-release)** and deliberately **not** latest stable.
+> The wheel, source distribution, and `SHA256SUMS` are attached to the
+> release. pipebridge is **not** published to PyPI. Existing `v0.1.0`,
+> `v0.2.0`, and `v0.2.1` tags, releases, and assets are unchanged.
 >
+> Release-preparation pull request
+> [#20](https://github.com/marcelodevops/pipebridge/pull/20) merged at
+> `a13a0a00f9eff7e6505f6ade9fd0db40bbd7ca9c`. All four required CI checks
+> passed on that exact merge commit:
+> <https://github.com/marcelodevops/pipebridge/actions/runs/44659066648>
+> (335 passed on Python 3.10 and 3.13).
 > The implementation increment is pull request
 > [#19](https://github.com/marcelodevops/pipebridge/pull/19), merged at
 > `09a0e7f45b21cced69a7bac6709681dfba7ddbd7`. All four required CI checks
@@ -96,14 +103,14 @@ including `examples/python-build`, changes only in the tool-version header.
 Requires Python 3.10+ (CI tests 3.10 and 3.13). Runtime dependency:
 PyYAML >= 6.0. `actionlint` is optional and reported honestly when absent.
 
-When published, the expected attached assets are:
+Attached assets:
 
 - `pipebridge-0.3.0-py3-none-any.whl`
 - `pipebridge-0.3.0.tar.gz`
+- `SHA256SUMS`
 
-pipebridge is not published to PyPI. The published v0.2.1 installation
-instructions remain valid until v0.3.0 is released. This preparation does
-not upload those assets.
+pipebridge is not published to PyPI. Install from the v0.3.0 release
+assets, not from PyPI.
 
 ## Verification
 
@@ -121,13 +128,15 @@ not upload those assets.
   structural live-workflow comparison with only the documented
   `defaults.run.working-directory: examples/python-build` adjustment.
   Report tool version was `0.3.0`.
-- Package build: wheel and sdist built from the release-preparation tree;
-  `twine check` **PASSED** for both. These are local preparation builds,
-  not uploaded release assets:
-  - `d3c28474936490acc4055fe02cfd51b438b77110bb71d42d737a03278c14bfd7`
+- Package build from a clean archive of the tagged commit
+  `a13a0a00f9eff7e6505f6ade9fd0db40bbd7ca9c`; `twine check` **PASSED**
+  for both. Uploaded asset SHA-256:
+  - `71ed6befb9a0dd7a16f58f00214347abd0c852e6526de243ee4b32dd1b7f9db8`
     `pipebridge-0.3.0-py3-none-any.whl`
-  - `92f604d49d27b58787fbcfff8c1b01d6fee4111d884a0e460c533d90ccde7869`
+  - `2ea6cb3d22a37d46be1477dce15c9eb972931d88900e63f9786a492250d13db9`
     `pipebridge-0.3.0.tar.gz`
+  File contents match the release-preparation wheel; the archive hashes
+  differ only because zip entry timestamps come from this commit.
 - Fresh-environment installation, one new venv per artifact, outside the
   checkout, with `PYTHONPATH` unset: **24/24 checks passed for the wheel
   and 24/24 for the sdist**, covering:
@@ -177,23 +186,39 @@ workflow and Kymatio's disabled draft are otherwise unchanged.
 - `workflow_dispatch` only; one workflow, one job; no automatic secret
   migration.
 
+## Published assets (SHA-256)
+
+```
+71ed6befb9a0dd7a16f58f00214347abd0c852e6526de243ee4b32dd1b7f9db8  pipebridge-0.3.0-py3-none-any.whl
+2ea6cb3d22a37d46be1477dce15c9eb972931d88900e63f9786a492250d13db9  pipebridge-0.3.0.tar.gz
+```
+
 ## Release checklist state
 
-Prepared and verified locally:
+Published:
 
 - [x] Version bumped to `0.3.0` (`src/pipebridge/__init__.py`).
 - [x] Changelog entry added; these release notes added.
 - [x] Committed example output, live-workflow version comment, clean
       baseline, and pure-declarative goldens regenerated with 0.3.0.
-- [x] Full suite, actionlint, and example validation green.
-- [x] Wheel and sdist built; `twine check` passed.
+- [x] Full suite, actionlint, and example validation green on the
+      release-preparation PR and on the merge commit.
+- [x] Release-preparation PR #20 merged at
+      `a13a0a00f9eff7e6505f6ade9fd0db40bbd7ca9c`; all four CI checks green
+      on that exact commit
+      (<https://github.com/marcelodevops/pipebridge/actions/runs/44659066648>):
+      335 passed on Python 3.10 and 3.13.
+- [x] Wheel and sdist built from a clean checkout of that commit;
+      `twine check` passed.
 - [x] Fresh wheel and sdist venvs outside the checkout, `PYTHONPATH`
-      unset: 24/24 checks each.
+      unset: the documented acceptance matrix passed for both artifacts.
+- [x] Annotated tag `v0.3.0` created at `a13a0a00f9eff7e6505f6ade9fd0db40bbd7ca9c`.
+- [x] GitHub prerelease published with wheel, sdist, and `SHA256SUMS`,
+      not marked latest.
+- [x] v0.1.0, v0.2.0, and v0.2.1 tags, releases, and assets left untouched.
+- [x] No PyPI publication.
 
-Deliberately **not** done in this increment:
-
-- [ ] Merge the release-preparation PR (human decision).
-- [ ] Tag `v0.3.0`.
-- [ ] Publish a GitHub release or upload artifacts.
-- [ ] Modify or replace any v0.1.0, v0.2.0, or v0.2.1 tag, release, or asset.
-- [ ] Publish to PyPI.
+Post-publication download, checksum verification, and fresh-venv
+re-testing of the published assets are recorded in
+[`docs/release-verification-v0.3.0.md`](release-verification-v0.3.0.md).
+That record does not move the tag or replace any asset.
