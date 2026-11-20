@@ -257,6 +257,22 @@ class _Parser:
                 return
             self._advance()
 
+    def _skip_rejected_credential_tail(self) -> None:
+        """Skip a rejected withCredentials call without translating a detached block.
+
+        ``withCredentials(...); { ... }`` is not a binding body. Skip that
+        closure opaquely so later siblings remain visible, and never turn
+        its statements into Steps.
+        """
+        self._skip_step_tail()
+        saved = self._pos
+        while self._peek().kind in (SEMI, NEWLINE):
+            self._advance()
+        if self._pos != saved and self._peek().kind == LBRACE:
+            self._skip_balanced(LBRACE, RBRACE)
+            return
+        self._pos = saved
+
     def _skip_step_tail(self) -> None:
         """Skip arguments/blocks that may follow an unsupported step name.
 
@@ -1708,7 +1724,10 @@ class _Parser:
         tokens = self._tokens
 
         def skip(index: int) -> int:
-            while index < len(tokens) and tokens[index].kind in (NEWLINE, SEMI):
+            # Newlines are insignificant. Semicolons separate statements and
+            # are not header whitespace; a ';' between tokens or before '{'
+            # rejects the header instead of attaching a detached closure.
+            while index < len(tokens) and tokens[index].kind == NEWLINE:
                 index += 1
             return min(index, len(tokens) - 1)
 
@@ -1853,7 +1872,7 @@ class _Parser:
                 self._CRED_SUGGESTION,
             )
             self._mark_stage_blocked(stage)
-            self._skip_step_tail()
+            self._skip_rejected_credential_tail()
             return
 
         self._pos = header.body_pos
@@ -2781,7 +2800,7 @@ class _Parser:
                 "Create GitHub Actions secrets and reference them explicitly "
                 "(secrets.<NAME>); rewrite the bound step manually.",
             )
-            self._skip_step_tail()
+            self._skip_rejected_credential_tail()
             return
         message = (
             f"Step '{name}' is not supported by the MVP; the enclosing stage "

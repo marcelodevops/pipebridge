@@ -304,6 +304,134 @@ pipeline {
     assert entry.variable == "TOK"
 
 
+_SEMICOLON_HEADERS = [
+    "withCredentials(; [string(credentialsId: 'id', variable: 'TOK')])",
+    "withCredentials([; string(credentialsId: 'id', variable: 'TOK')])",
+    "withCredentials([string(; credentialsId: 'id', variable: 'TOK')])",
+    "withCredentials([string(credentialsId; : 'id', variable: 'TOK')])",
+    "withCredentials([string(credentialsId:; 'id', variable: 'TOK')])",
+    "withCredentials([string(credentialsId: 'id'; variable: 'TOK')])",
+    "withCredentials([string(credentialsId: 'id',; variable: 'TOK')])",
+    "withCredentials([string(credentialsId: 'id', variable: 'TOK'); ])",
+    "withCredentials([string(credentialsId: 'id', variable: 'TOK')]; )",
+    "withCredentials([string(credentialsId: 'id', variable: 'TOK')]);",
+]
+
+
+def _semicolon_source(header: str, *, agent: str = "any") -> str:
+    return (
+        "pipeline {\n"
+        f"  agent {agent}\n"
+        "  stages {\n"
+        "    stage('A') {\n"
+        "      steps {\n"
+        f"        {header} {{\n"
+        "          sh 'secret-cmd'\n"
+        "        }\n"
+        "        mavenBuild 'later'\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+def _assert_malformed_header_stays_blocked(analysis, workflow: str) -> None:
+    stage = analysis.pipeline.stages[0]
+    assert stage.blocked is True
+    assert stage.steps == []
+    assert analysis.credential_inventory.entries
+    assert all(entry.status == "unsupported" for entry in analysis.credential_inventory.entries)
+    assert any(f.code == "PB-CRED" for f in analysis.findings)
+    assert any(f.code == "PB-SYNTAX" and "mavenBuild" in f.message for f in analysis.findings)
+    assert not any(f.code == "PB-ASSUME-CREDENTIALS" for f in analysis.findings)
+    job, _ = _job(analysis)
+    assert job["if"] is False
+    assert "secret-cmd" not in workflow
+    assert "secrets.THE_SECRET" not in workflow
+    assert "TOK:" not in workflow
+
+
+@pytest.mark.parametrize("header", _SEMICOLON_HEADERS)
+def test_semicolon_in_header_stays_blocked_with_ready_map(tmp_path, header):
+    cred_map = _map(tmp_path / "map.json", {"id": {"secret": "THE_SECRET"}})
+    analysis = analyze_source(
+        _semicolon_source(header),
+        load_credential_map(cred_map),
+        secrets_ready=True,
+    )
+    _assert_malformed_header_stays_blocked(analysis, generate_workflow(analysis, "Jenkinsfile"))
+
+
+def test_semicolon_before_body_is_not_translated_from_a_blocked_scope():
+    result = parse(_semicolon_source(
+        "withCredentials([string(credentialsId: 'id', variable: 'TOK')]);",
+        agent="none",
+    ))
+    messages = "\n".join(f.message for f in result.findings)
+    assert "SECRET" not in messages
+    assert "secret-cmd" not in messages
+    assert result.pipeline.stages[0].steps == []
+    entry = result.credential_inventory.entries[0]
+    assert entry.status == "unsupported"
+    assert any(f.code == "PB-SYNTAX" and "mavenBuild" in f.message for f in result.findings)
+
+
+def test_body_semicolons_and_newlines_still_translate(tmp_path):
+    cred_map = load_credential_map(
+        _map(
+            tmp_path / "map.json",
+            {"id": {"secret": "THE_SECRET"}, "id;still": {"secret": "STILL_SECRET"}},
+        )
+    )
+    body = """
+pipeline {
+  agent any
+  stages {
+    stage('A') {
+      steps {
+        withCredentials([string(credentialsId: 'id', variable: 'TOK')]) {
+          sh 'one'; echo 'two'; checkout scm
+        }
+      }
+    }
+  }
+}
+"""
+    analysis = analyze_source(body, cred_map, secrets_ready=True)
+    steps = analysis.pipeline.stages[0].steps
+    assert [step.kind for step in steps] == ["sh", "echo", "checkout"]
+    assert all(step.credential_binding_ids == ("cred-1",) for step in steps)
+    job, workflow = _job(analysis)
+    assert "if" not in job
+    assert '${{ secrets.THE_SECRET }}' in workflow
+
+    spaced = """
+pipeline {
+  agent any
+  stages {
+    stage('A') {
+      steps {
+        withCredentials([
+          string(
+            credentialsId: 'id;still',
+            variable: 'TOK'
+          )
+        ])
+        {
+          sh 'ok'
+        }
+      }
+    }
+  }
+}
+"""
+    analysis = analyze_source(spaced, cred_map, secrets_ready=True)
+    assert analysis.pipeline.stages[0].steps[0].text == "ok"
+    assert analysis.credential_inventory.entries[0].status == "resolved"
+    assert '${{ secrets.STILL_SECRET }}' in generate_workflow(analysis, "Jenkinsfile")
+
+
 def test_unsupported_variants_keep_the_legacy_message_and_no_inventory_outside_steps():
     source = _pipeline(
         "                withCredentials([string(credentialsId: 'c', usernameVariable: 'U')]) {\n"
@@ -576,6 +704,40 @@ def test_cli_convert_ready_binding_and_unused_map_entry(tmp_path):
     parsed = yaml.safe_load((out / "workflow.yml").read_text())
     assert "if" not in parsed["jobs"]["migrated-pipeline"]
     assert "do-not-leak" not in (out / "migration-report.md").read_text()
+
+
+def test_cli_rejects_semicolon_headers_even_when_secrets_are_ready(tmp_path):
+    cred_map = _map(tmp_path / "map.json", {"id": {"secret": "THE_SECRET"}})
+    headers = [
+        "withCredentials([string(credentialsId: 'id', variable: 'TOK')]);",
+        "withCredentials(; [string(credentialsId: 'id', variable: 'TOK')])",
+    ]
+    for index, header in enumerate(headers):
+        jenkinsfile = tmp_path / f"Jenkinsfile-{index}"
+        jenkinsfile.write_text(_semicolon_source(header), encoding="utf-8")
+        out = tmp_path / f"out-{index}"
+        assert main(
+            [
+                "convert",
+                str(jenkinsfile),
+                "--output",
+                str(out),
+                "--credential-map",
+                str(cred_map),
+                "--secrets-ready",
+            ]
+        ) == 2
+        workflow = (out / "workflow.yml").read_text()
+        report = json.loads((out / "migration-report.json").read_text())
+        assert report["exit_code"] == 2
+        assert report["credentials"]["bindings"]
+        assert all(row["status"] == "unsupported" for row in report["credentials"]["bindings"])
+        assert report["credentials"]["required_secrets"] == []
+        parsed = yaml.safe_load(workflow)
+        assert parsed["jobs"]["migrated-pipeline"]["if"] is False
+        assert "secret-cmd" not in workflow
+        assert "secrets.THE_SECRET" not in workflow
+        assert "mavenBuild" not in workflow
 
 
 def test_internal_unresolved_step_reference_fails_closed():
