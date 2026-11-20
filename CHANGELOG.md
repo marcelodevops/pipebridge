@@ -4,7 +4,7 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] — Alpha (2026-11-19)
+## [0.3.0] — Alpha (2026-11-20)
 
 **Bounded pipeline-level literal agent-label mapping.** A single
 pipeline-level `agent { label '<literal>' }` or `agent { label "<literal>" }`
@@ -38,7 +38,8 @@ expression label, Jetty, and Kymatio stay `ubuntu-latest` and `PB-AGENT`.
 `agent any` output, including `examples/python-build`, is otherwise
 unchanged apart from this version header.
 
-Not yet published: no `v0.3.0` tag, GitHub release, or release asset exists.
+Published as an alpha prerelease:
+<https://github.com/marcelodevops/pipebridge/releases/tag/v0.3.0>.
 Published v0.1.0, v0.2.0, and v0.2.1 assets are unchanged.
 
 ### Added
