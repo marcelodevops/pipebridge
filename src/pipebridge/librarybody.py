@@ -7,7 +7,7 @@ findings with source paths and call chains.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .findings import PB_INTERP, PB_LIB_CALL, Finding
@@ -88,6 +88,11 @@ def _label(path: Path, defn: Definition) -> str:
     return f"{path}:{defn.name}@{defn.span.line}:{defn.span.col}"
 
 
+def _frame(caller_path: Path | None, line: int, col: int, name: str) -> str:
+    base = str(caller_path) if caller_path is not None else "<root>"
+    return f"{base}:{name}@{line}:{col}"
+
+
 class Resolver:
     def __init__(self, library_map: LibraryMap, discovered: list[DiscoveredVar] | None = None):
         self.map = library_map
@@ -111,21 +116,22 @@ class Resolver:
         self.vars[var.path] = var
         return var
 
-    def resolve(self, lib_name: str, var_name: str, args: list[str]) -> Resolution:
+    def resolve(self, lib_name: str, var_name: str, args: list[str], caller=None) -> Resolution:
+        root_frame = _frame(*(caller if caller is not None else (None, 1, 1, var_name)))
         all_candidates = self._candidates(var_name)
         if len(all_candidates) > 1:
             paths = sorted(str(d.path) for d in all_candidates)
-            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1, path=all_candidates[0].path, chain=(f"{var_name}@1:1",))])
+            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1, path=all_candidates[0].path, chain=(root_frame,))])
         candidates = [d for d in all_candidates if d.library == lib_name]
         if not candidates:
-            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library '{lib_name}' has no vars/{var_name}.groovy.", 1, 1, chain=(f"{var_name}@1:1",))])
+            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library '{lib_name}' has no vars/{var_name}.groovy.", 1, 1, chain=(root_frame,))])
         if len(candidates) > 1:
             paths = sorted(str(d.path) for d in candidates)
-            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1, path=all_candidates[0].path, chain=(f"{var_name}@1:1",))])
+            return Resolution(blocked=True, findings=[_finding(PB_LIB_CALL, f"Library var '{var_name}' is defined in more than one loaded library: {paths[0]}, {paths[1]}.", 1, 1, path=all_candidates[0].path, chain=(root_frame,))])
         disc = candidates[0]
         var = self._load(disc.path, self.map.entries[disc.library].root)  # may raise LibraryResolutionError
         res = Resolution()
-        self._merge_findings(var, res)
+        self._merge_findings(var, res, (root_frame,))
         if res.blocked:
             res.operations = []
             return res
@@ -140,33 +146,31 @@ class Resolver:
             res.operations = []
             res.findings.append(_finding(PB_LIB_CALL, f"Library call '{var_name}' passed {len(args)} argument(s); call() requires {len(call.params)}.", call.span.line, call.span.col, path=var.path, chain=(_label(var.path, call),)))
             return res
-        self._expand(var, call, args, [], res)
+        self._expand(var, call, args, [], (root_frame,), res)
         if res.blocked:
             res.operations = []
         return res
 
-    def _merge_findings(self, var: LibraryVar, res: Resolution) -> None:
+    def _merge_findings(self, var: LibraryVar, res: Resolution, frames=()) -> None:
         for f in var.findings:
-            res.findings.append(f)
+            merged = replace(f, call_chain=frames) if f.call_chain != frames else f
+            res.findings.append(merged)
             if f.is_blocker:
                 res.blocked = True
 
-    def _expand(self, var, defn, arg_values, stack, res):
+    def _expand(self, var, defn, arg_values, stack, frames, res):
         if len(stack) >= LIBRARY_CALL_DEPTH_CAP:
             res.blocked = True
-            labels = tuple(_label(pp, dd) for pp, dd in stack) + (_label(var.path, defn),)
-            res.findings.append(_finding(PB_LIB_CALL, f"Library call depth exceeded {LIBRARY_CALL_DEPTH_CAP} at '{defn.name}'.", defn.span.line, defn.span.col, path=var.path, chain=labels))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library call depth exceeded {LIBRARY_CALL_DEPTH_CAP} at '{defn.name}'.", defn.span.line, defn.span.col, path=var.path, chain=frames))
             return
         for (p, d) in stack:
             if p == var.path and d.name == defn.name:
-                labels = tuple(_label(pp, dd) for pp, dd in stack) + (_label(var.path, defn),)
-                chain = " -> ".join(labels)
+                chain = " -> ".join(frames)
                 res.blocked = True
-                res.findings.append(_finding(PB_LIB_CALL, f"Library call cycle: {chain}.", defn.span.line, defn.span.col, path=var.path, chain=labels))
+                res.findings.append(_finding(PB_LIB_CALL, f"Library call cycle: {chain}.", defn.span.line, defn.span.col, path=var.path, chain=frames))
                 return
         params = {p.name: v for p, v in zip(defn.params, arg_values)}
-        labels = tuple(_label(pp, dd) for pp, dd in stack) + (_label(var.path, defn),)
-        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, labels)
+        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, frames)
 
     def _arg_value(self, tok, params):
         if tok.kind in STRING_KINDS:
@@ -240,6 +244,7 @@ class Resolver:
         res.operations.append(Operation(kind=which, text=dec.value if dec.value is not None else stmt[1 if not paren else 2].value, bindings=bindings, span=Span(tok.line, tok.col), path=path, call_chain=chain))
 
     def _do_invocation(self, name_tok, stmt, var, defn, params, stack, res, chain):
+        chain = chain + (_frame(var.path, name_tok.line, name_tok.col, name_tok.value),)
         args = []
         idx = 2
         while True:
@@ -289,7 +294,7 @@ class Resolver:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); requires {len(helper.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
-            self._expand(var, helper, args, stack, res)
+            self._expand(var, helper, args, stack, chain, res)
             return
         if candidates:
             if len(candidates) > 1:
@@ -299,7 +304,7 @@ class Resolver:
                 return
             disc = candidates[0]
             nested = self._load(disc.path, self.map.entries[disc.library].root)  # may raise LibraryResolutionError
-            self._merge_findings(nested, res)
+            self._merge_findings(nested, res, chain)
             if res.blocked:
                 return
             call = nested.call
@@ -311,7 +316,7 @@ class Resolver:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); call() requires {len(call.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
-            self._expand(nested, call, args, stack, res)
+            self._expand(nested, call, args, stack, chain, res)
             return
         res.blocked = True
         res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has no definition.", name_tok.line, name_tok.col, path=var.path, chain=chain))

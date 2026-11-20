@@ -250,11 +250,11 @@ def test_identically_named_helpers_provenance(tmp_path):
         assert r.operations == []
         f = r.findings[-1]
         assert f.source_path is not None
-        assert "helper@" in f.call_chain[-1]
+        assert f"{var}.groovy:helper@" in f.call_chain[-2]
         # chain distinguishes files and call sites, in call order
-        assert len(f.call_chain) >= 2
-        assert f"{var}.groovy:call@" in f.call_chain[0]
-        assert "one.groovy" in f.call_chain[0] or "two.groovy" in f.call_chain[0]
+        assert len(f.call_chain) >= 3
+        assert f.call_chain[0].startswith("<root>:")
+        assert f.call_chain[0].endswith(f"{var}@1:1")
 
 
 def test_missing_definition_provenance(tmp_path):
@@ -263,7 +263,7 @@ def test_missing_definition_provenance(tmp_path):
     r = Resolver(lm).resolve("build-lib", "publish", [])
     f = r.findings[-1]
     assert f.source_path is not None
-    assert "publish.groovy:call@" in f.call_chain[0]
+    assert "publish.groovy:nope@" in f.call_chain[-1]
     assert any("no definition" in x.message for x in r.findings)
 
 
@@ -274,4 +274,41 @@ def test_recursion_provenance(tmp_path):
     f = [x for x in r.findings if "cycle" in x.message][0]
     assert f.source_path is not None
     assert len(f.call_chain) >= 2
-    assert "call@" in f.call_chain[0]
+    assert f.call_chain[0].startswith("<root>:")
+    assert "call@" in f.call_chain[-1]
+
+
+def test_same_helper_two_call_sites_distinct_positions(tmp_path):
+    root, lm = make_lib(tmp_path)
+    write(root, "publish", "def call() {\n  helper('a')\n  helper('b')\n}\ndef helper(String v) { sh \"v=$v\" }\n")
+    r = Resolver(lm).resolve("build-lib", "publish", [])
+    assert not r.blocked
+    chains = [o.call_chain for o in r.operations]
+    assert chains[0] != chains[1]
+    assert chains[0][-1].endswith("helper@2:3")
+    assert chains[1][-1].endswith("helper@3:3")
+
+
+def test_malformed_reached_file_keeps_own_location_and_caller_chain(tmp_path):
+    (tmp_path / "a" / "vars").mkdir(parents=True)
+    (tmp_path / "b" / "vars").mkdir(parents=True)
+    (tmp_path / "a" / "vars" / "one.groovy").write_text(
+        "def call() { two() }\n", encoding="utf-8"
+    )
+    (tmp_path / "b" / "vars" / "two.groovy").write_text(
+        "def call(String a,) { sh 'x' }\n", encoding="utf-8"
+    )
+    (tmp_path / "library-map.json").write_text(json.dumps({
+        "schema_version": 1,
+        "libraries": {"a": {"path": "a"}, "b": {"path": "b"}},
+    }), encoding="utf-8")
+    lm = load_library_map(tmp_path / "library-map.json")
+    r = Resolver(lm).resolve("a", "one", [])
+    assert r.blocked
+    assert r.operations == []
+    malformed = [f for f in r.findings if "invalid parameter list" in f.message][0]
+    assert malformed.source_path is not None and malformed.source_path.endswith("b/vars/two.groovy")
+    assert malformed.line == 1
+    # caller chain: root frame then two() invocation site in one.groovy
+    assert malformed.call_chain[0].startswith("<root>:")
+    assert "a/vars/one.groovy:two@" in malformed.call_chain[-1]

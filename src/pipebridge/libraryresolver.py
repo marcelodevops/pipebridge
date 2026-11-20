@@ -386,12 +386,15 @@ def load_var(path: Path, root: Path, name: str | None = None) -> LibraryVar:
         text = resolved.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         var.findings.append(
-            _finding(
-                PB_LIB_CALL,
-                f"Library file '{resolved}' cannot be read: {exc}",
-                1,
-                1,
-                construct="library file",
+            replace(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Library file '{resolved}' cannot be read: {exc}",
+                    1,
+                    1,
+                    construct="library file",
+                ),
+                source_path=str(resolved),
             )
         )
         return var
@@ -399,12 +402,15 @@ def load_var(path: Path, root: Path, name: str | None = None) -> LibraryVar:
         tokens = tokenize(text)
     except LexError as exc:
         var.findings.append(
-            _finding(
-                PB_LIB_CALL,
-                f"Library file '{resolved}' cannot be read: {exc}",
-                exc.line,
-                exc.col,
-                construct="library file",
+            replace(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Library file '{resolved}' cannot be read: {exc}",
+                    exc.line,
+                    exc.col,
+                    construct="library file",
+                ),
+                source_path=str(resolved),
             )
         )
         return var
