@@ -111,7 +111,8 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 | Triple-quoted strings `'''…'''`, `"""…"""` | ✅ Supported | Same rules as their single/double counterparts; newlines preserved |
 | `script { }` blocks and scripted pipelines | ❌ Blocked | `PB-SCRIPT` |
 | Shared libraries, custom steps | ❌ Blocked | `PB-LIB`, `PB-SYNTAX` |
-| `credentials()` / `withCredentials` | ❌ Blocked | `PB-CRED` — automatic secret migration is a later phase |
+| Literal `withCredentials([string(credentialsId: '…', variable: 'NAME')])` in `steps` | ⚠️ With acknowledgement | One `string` binding whose body is only `sh` / `echo` / `checkout scm`. `NAME` becomes a step `env` key whose value is `${{ secrets.MAPPED }}` from an explicit `--credential-map`. pipebridge never reads secret values. Without `--secrets-ready` the job stays disabled (`PB-CRED-SETUP`). See [`docs/v0.4.0-credential-bindings-design.md`](docs/v0.4.0-credential-bindings-design.md) |
+| `credentials()`, other `withCredentials` forms, nested bindings, dynamic IDs | ❌ Blocked | `PB-CRED` — not migrated; unsupported bodies stay opaque |
 | `parallel` / `matrix` | ❌ Blocked | `PB-PARALLEL`, `PB-MATRIX` |
 | `tools` | ❌ Blocked | `PB-TOOLS` |
 | `when`, `parameters`, `triggers`, `input`, `post`, `options` | ❌ Blocked | `PB-WHEN`, `PB-PARAM`, `PB-TRIGGER`, `PB-INPUT`, `PB-POST`, `PB-SYNTAX` |
@@ -121,7 +122,7 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 | Annotations before the block other than `@Library` | ❌ Blocked | `PB-GROOVY-PRELUDE` — `@Library` keeps its existing `PB-LIB` classification |
 | Helper function definitions or other statements after the block | ❌ Blocked | `PB-GROOVY-POSTLUDE` — executable Groovy, skipped without evaluation; the declarative block is still extracted and listed, and calls to the helpers from steps stay blocked |
 
-Unsupported blocks are **not traversed**: a `script { }` or `withCredentials { … }` body is never mined for `sh`/`echo` commands as though its enclosing behavior didn't exist.
+Unsupported blocks are **not traversed**: a `script { }` body, or a `withCredentials` form that is not the accepted literal `string` binding, is never mined for `sh`/`echo` commands as though its enclosing behavior didn't exist. An accepted `string` header is scanned only for supported top-level steps; an unknown or nested body stops that scan and is not mined.
 
 Groovy **surrounding** the pipeline block is likewise never evaluated or translated: only its statement boundaries are recognized (enough to report it precisely and still parse the pipeline block). Surrounding executable Groovy is a pipeline-level blocker, so the generated draft remains a disabled skeleton that lists the extracted stages; a draft never appears fully migrated while surrounding Groovy is unmodeled.
 
@@ -349,7 +350,7 @@ The report is explicit about what was and was not read.
 
 - The supported subset is deliberately small; anything outside it is reported, never approximated.
 - Surrounding Groovy is recognized only within a deliberately limited grammar (ordinary imports, annotations, variable declarations, function definitions). It is **never evaluated or translated**, and this is not complete Groovy parsing: an unrecognized statement before the block still classifies the whole file as `PB-SCRIPT`, and multiple or ambiguous `pipeline` occurrences are rejected rather than resolved.
-- Findings inside a blocked scope are diagnostics, not translated behavior. pipebridge reports the triggering construct and the declarative siblings it can see, but it does not emit steps or nested stages from that scope, and the draft stays disabled. Opaque bodies (`script`, shared libraries, agent internals, `when` expressions, `post`, `withCredentials`, and unknown closures) are boundaries, not traversed code; traversal also stops at nesting depth 20 and reports the truncation. See [`docs/d2-nested-diagnostics-design.md`](docs/d2-nested-diagnostics-design.md).
+- Findings inside a blocked scope are diagnostics, not translated behavior. pipebridge reports the triggering construct and the declarative siblings it can see, but it does not emit steps or nested stages from that scope, and the draft stays disabled. Opaque bodies (`script`, shared libraries, agent internals, `when` expressions, `post`, unsupported `withCredentials`, and unknown closures) are boundaries, not traversed code; traversal also stops at nesting depth 20 and reports the truncation. A `withCredentials` seen only through that diagnostic walk is recorded as unsupported and is not translated. See [`docs/d2-nested-diagnostics-design.md`](docs/d2-nested-diagnostics-design.md).
 - No Jenkins runtime equivalence is claimed or tested: values computed by surrounding Groovy at Jenkins runtime are not carried into any generated workflow.
 - One workflow, one job, `workflow_dispatch` only. No push/PR triggers in the MVP.
 - Groovy is supported only as far as literal string forms; any dynamic expression is a blocker.

@@ -2,7 +2,7 @@
 
 - **Source:** `examples/python-build/Jenkinsfile` (sha256 `7c680aa3e5b21c16f444f95d4817d5877b163556ebb71c468e52c5403666a354`)
 - **Tool:** pipebridge 0.3.0
-- **Generated:** 2026-11-19T22:06:09Z
+- **Generated:** 2026-11-20T04:11:03Z
 - **Result:** converted without blockers (review assumptions below)
 - **Exit code:** 0
 

@@ -34,6 +34,7 @@ REPORT_KEYS = {
     "blockers",
     "assumptions",
     "translated",
+    "credentials",
     "validation",
 }
 FINDING_KEYS = {"code", "severity", "construct", "message", "line", "col", "suggestion"}

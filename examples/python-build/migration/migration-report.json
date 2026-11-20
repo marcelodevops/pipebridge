@@ -3,7 +3,7 @@
     "name": "pipebridge",
     "version": "0.3.0"
   },
-  "generated_at": "2026-11-19T22:06:09Z",
+  "generated_at": "2026-11-20T04:11:03Z",
   "source": {
     "path": "examples/python-build/Jenkinsfile",
     "sha256": "7c680aa3e5b21c16f444f95d4817d5877b163556ebb71c468e52c5403666a354"
@@ -124,6 +124,13 @@
       ]
     }
   ],
+  "credentials": {
+    "map_supplied": false,
+    "setup_acknowledged": false,
+    "bindings": [],
+    "required_secrets": [],
+    "checklist": []
+  },
   "validation": {
     "yaml_parse": {
       "ok": true,
