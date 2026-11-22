@@ -1,0 +1,237 @@
+{
+  "tool": {
+    "name": "pipebridge",
+    "version": "0.4.0"
+  },
+  "generated_at": "2026-11-22T20:29:03Z",
+  "source": {
+    "path": "examples/shared-library/success/Jenkinsfile",
+    "sha256": "623adc9f56a9df89076ea261ace58d088ed3fcdeb2c04795bdd097a6328dc85a"
+  },
+  "exit_code": 0,
+  "summary": {
+    "blockers": 0,
+    "warnings": 0,
+    "info": 7,
+    "translated_stages": 2,
+    "translated_steps": 6
+  },
+  "findings": [
+    {
+      "code": "PB-ASSUME-LIBRARY",
+      "severity": "info",
+      "construct": "shared library annotation",
+      "message": "Local directory 'build-lib' was used as library 'build-lib'. Jenkins library resolution was not run.",
+      "line": 1,
+      "col": 1,
+      "suggestion": "Verify the local directory matches the intended Jenkins library."
+    },
+    {
+      "code": "PB-ASSUME-SHELL",
+      "severity": "info",
+      "construct": "shell execution environment",
+      "message": "Steps run under 'bash --noprofile --norc -eo pipefail' on GitHub Actions; Jenkins 'sh' uses '/bin/sh -xe'. Shell differences (pipefail, tracing, tool availability) may change behavior.",
+      "line": 2,
+      "col": 1,
+      "suggestion": "Review each command under 'set -eo pipefail' bash semantics."
+    },
+    {
+      "code": "PB-SINGLE-JOB",
+      "severity": "info",
+      "construct": "sequential stages",
+      "message": "All sequential stages are kept in a single GitHub Actions job so filesystem state (the Jenkins executor workspace) is preserved between stages.",
+      "line": 2,
+      "col": 1,
+      "suggestion": "Split into multiple jobs only with explicit needs/ and artifact passing."
+    },
+    {
+      "code": "PB-TRIGGER-MANUAL",
+      "severity": "info",
+      "construct": "workflow trigger",
+      "message": "The generated workflow triggers on workflow_dispatch only.",
+      "line": 2,
+      "col": 1,
+      "suggestion": "Add push/pull_request/schedule triggers deliberately after review."
+    },
+    {
+      "code": "PB-ASSUME-CREDENTIALS",
+      "severity": "info",
+      "construct": "credential setup acknowledgement",
+      "message": "The user acknowledged that every secret named in the credential checklist exists in the target repository. pipebridge did not verify that and never reads secret values.",
+      "line": 3,
+      "col": 5,
+      "suggestion": "Confirm each secret name matches the checklist exactly before enabling the workflow.",
+      "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy",
+      "call_chain": [
+        "examples/shared-library/success/Jenkinsfile:publish@7:17"
+      ]
+    },
+    {
+      "code": "PB-ASSUME-RUNNER",
+      "severity": "info",
+      "construct": "agent any",
+      "message": "'agent any' does not establish the required OS, installed tools, or network access; the generated workflow assumes the 'ubuntu-latest' runner.",
+      "line": 3,
+      "col": 5,
+      "suggestion": "Verify the runner image provides every tool the commands need."
+    },
+    {
+      "code": "PB-ASSUME-CHECKOUT",
+      "severity": "info",
+      "construct": "default SCM checkout (implicit)",
+      "message": "Jenkins checks out source from SCM before the first stage (default checkout). An implicit 'Checkout source (implicit)' step was inserted before the first translated step, in addition to any explicit 'checkout scm' steps (Jenkins performs both; checkouts are not deduplicated). This assumes the workflow runs in the migrated source repository.",
+      "line": 5,
+      "col": 9,
+      "suggestion": "If the Jenkins job did not check out source (e.g. it only used artifacts), remove the implicit checkout step."
+    }
+  ],
+  "blockers": [],
+  "assumptions": [
+    "PB-ASSUME-LIBRARY",
+    "PB-ASSUME-SHELL",
+    "PB-SINGLE-JOB",
+    "PB-TRIGGER-MANUAL",
+    "PB-ASSUME-CREDENTIALS",
+    "PB-ASSUME-RUNNER",
+    "PB-ASSUME-CHECKOUT"
+  ],
+  "translated": [
+    {
+      "stage": "Publish",
+      "source_line": 5,
+      "blocked": false,
+      "steps": [
+        {
+          "kind": "sh",
+          "source_line": 10,
+          "detail": "mkdir -p dist && printf %s \"${1}\" > dist/marker.txt",
+          "script_path": "scripts/build-lib/publish/packageSources-1.sh",
+          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy",
+          "args": [
+            "packaged"
+          ]
+        },
+        {
+          "kind": "sh",
+          "source_line": 4,
+          "detail": "test -n \"$NPM_TOKEN\" && printf %s ok > dist/seen.txt",
+          "script_path": "scripts/build-lib/publish/call-1.sh",
+          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy"
+        },
+        {
+          "kind": "stash",
+          "source_line": 6,
+          "detail": "dist",
+          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy"
+        }
+      ]
+    },
+    {
+      "stage": "Restore",
+      "source_line": 10,
+      "blocked": false,
+      "steps": [
+        {
+          "kind": "sh",
+          "source_line": 12,
+          "detail": "rm -rf dist"
+        },
+        {
+          "kind": "unstash",
+          "source_line": 13,
+          "detail": "dist"
+        },
+        {
+          "kind": "sh",
+          "source_line": 14,
+          "detail": "test -f dist/marker.txt && grep -qx packaged dist/marker.txt && test -f dist/seen.txt"
+        }
+      ]
+    }
+  ],
+  "credentials": {
+    "map_supplied": true,
+    "setup_acknowledged": true,
+    "bindings": [
+      {
+        "binding_id": "cred-1",
+        "binding_type": "string",
+        "credential_id": "npm-token",
+        "variable": "NPM_TOKEN",
+        "secret_name": "NPM_TOKEN_GH",
+        "stage": "Publish",
+        "source_line": 3,
+        "source_col": 5,
+        "status": "resolved",
+        "reason": null,
+        "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy",
+        "call_chain": [
+          "examples/shared-library/success/Jenkinsfile:publish@7:17"
+        ]
+      }
+    ],
+    "required_secrets": [
+      "NPM_TOKEN_GH"
+    ],
+    "checklist": [
+      {
+        "secret_name": "NPM_TOKEN_GH",
+        "credential_ids": [
+          "npm-token"
+        ],
+        "variables": [
+          "NPM_TOKEN"
+        ]
+      }
+    ]
+  },
+  "libraries": {
+    "map_supplied": true,
+    "conversion_deferred": false,
+    "loaded": [
+      {
+        "name": "build-lib",
+        "path": "build-lib",
+        "revision": null,
+        "discovered_vars": [
+          "publish"
+        ],
+        "vars": [
+          "publish"
+        ]
+      }
+    ],
+    "calls": [
+      {
+        "name": "publish",
+        "status": "resolved",
+        "source_path": "examples/shared-library/success/Jenkinsfile",
+        "line": 7,
+        "col": 17,
+        "chain": [
+          "examples/shared-library/success/Jenkinsfile:publish@7:17"
+        ]
+      }
+    ]
+  },
+  "validation": {
+    "yaml_parse": {
+      "ok": true,
+      "error": null,
+      "note": "yaml.safe_load"
+    },
+    "actionlint": {
+      "available": true,
+      "ok": true,
+      "exit_code": 0,
+      "output": "",
+      "version": "1.7.12",
+      "shellcheck_notes": null,
+      "structural_errors": null
+    },
+    "runtime": {
+      "performed": false,
+      "note": "Not performed: pipebridge does not execute generated workflows. YAML parsing and actionlint are static checks only; validate at runtime by dispatching the workflow manually."
+    }
+  }
+}
