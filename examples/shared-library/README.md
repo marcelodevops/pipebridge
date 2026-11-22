@@ -66,6 +66,35 @@ pipebridge convert examples/shared-library/failure/Jenkinsfile \
 
 ## Generated scripts and limitations
 
+- Generated outputs are committed under `examples/shared-library/success/migration/` and `examples/shared-library/failure/migration/`.
 - Generated scripts are written to `<output>/scripts/<library>/<var>/<function>-<n>.sh`, `<output>/scripts/pipebridge_stash.py`, and `<output>/scripts/pipebridge_unstash.py`. Commit the `<output>/scripts/` tree alongside `workflow.yml` and do not override `defaults.run.working-directory`.
 - Local mapped libraries only: pipebridge never fetches repositories, invokes `gh`, reads secret values, or executes Groovy.
 - Single-job `stash`/`unstash` only (`$RUNNER_TEMP/pipebridge-stash/<name>`), requiring `bash` and `python3` on the runner. Runtime restore `OSError`s fail non-zero and may leave partial destination changes; output replacement on disk is staged with `OSError` rollback but is not crash-atomic across process kills.
+
+## Live GitHub Actions validation
+
+GitHub Actions discovers workflows only under `.github/workflows/`. The live-validation copies are:
+
+- `.github/workflows/shared-library-success-example.yml` (from `success/migration/workflow.yml`, with a distinct `name:`, an added `Verify restored file bytes` check, and `Verify pipebridge stash cleanup` with `if: always()`)
+- `.github/workflows/shared-library-failure-example.yml` (from `failure/migration/workflow.yml`, with a distinct `name:` and `Verify pipebridge stash cleanup` with `if: always()`)
+
+### Operator secret setup (`NPM_TOKEN_GH`)
+
+Before dispatching `shared-library-success-example.yml`, create the example repository secret `NPM_TOKEN_GH` with a **synthetic test value** (never an actual token, never printed or committed, and never replacing an existing production secret):
+
+```sh
+# Confirm NPM_TOKEN_GH does not already exist before creating it:
+gh secret list --repo marcelodevops/pipebridge | grep -w NPM_TOKEN_GH || \
+  gh secret set NPM_TOKEN_GH --repo marcelodevops/pipebridge
+```
+
+`gh secret set` prompts interactively for the synthetic value so it does not appear in shell history.
+
+### Default-branch registration prerequisite and dispatch commands
+
+GitHub Actions only registers a `workflow_dispatch` workflow for manual dispatch after the workflow file exists on the repository's default branch (`main`). Once merged to `main`, dispatch both workflows with:
+
+```sh
+gh workflow run shared-library-success-example.yml --repo marcelodevops/pipebridge --ref main
+gh workflow run shared-library-failure-example.yml --repo marcelodevops/pipebridge --ref main
+```
