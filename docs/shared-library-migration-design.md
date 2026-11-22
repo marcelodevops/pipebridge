@@ -605,6 +605,8 @@ Do not widen `parser.py`'s diagnostic walker into library files. Do not change c
 9. The full suite, actionlint, and the existing python-build example validation pass.
 10. No version bump, tag, or release is part of the implementation PR unless a later release PR says so.
 
+**Status:** Implemented (PR #26 `7a2f067abf98e28bfcb57438344dc317668fcbfc`, PR #27 `522b0088ee0595b39b542ba2cb4a9ce810d73079`, PR #28 `f54d56e87b8ca8c94cf03aff25a6436e7444bf3a`). Live `workflow_dispatch` validation results and limits are recorded in [`docs/shared-library-live-validation.md`](shared-library-live-validation.md).
+
 ## 19. What this design PR does not change
 
 - `src/pipebridge/**`
