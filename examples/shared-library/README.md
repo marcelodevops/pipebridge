@@ -100,3 +100,5 @@ GitHub Actions only registers a `workflow_dispatch` workflow for manual dispatch
 gh workflow run shared-library-success-example.yml --repo marcelodevops/pipebridge --ref main
 gh workflow run shared-library-failure-example.yml --repo marcelodevops/pipebridge --ref main
 ```
+
+Recorded live validation results on `main` (`f54d56e87b8ca8c94cf03aff25a6436e7444bf3a`) are documented in [`docs/shared-library-live-validation.md`](../../docs/shared-library-live-validation.md).
