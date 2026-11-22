@@ -153,24 +153,24 @@ def decode_string(raw: str, kind: str, line: int, col: int) -> Decoded:
     return Decoded(raw=raw, kind=kind, value="".join(out), dollar_spans=dollar_spans)
 
 
-def decode_template(
+def decode_template_parts(
     raw: str,
     kind: str,
     line: int,
     col: int,
     allowed_params: set[str] | frozenset[str] | dict[str, str],
-) -> tuple[str | None, tuple[str, ...], list[Interpolation]]:
-    """Decode a Groovy string, replacing bare allowed-parameter interpolations with ``$1``, ``$2``, ...
+) -> tuple[tuple[tuple[str, str | int], ...] | None, tuple[str, ...], list[Interpolation]]:
+    """Decode a Groovy string into structured ``('lit', str)`` and ``('param', int)`` parts.
 
-    Returns ``(decoded_template, param_order, invalid_interpolations)``.
-    If any interpolation is not a bare identifier in ``allowed_params``,
-    ``decoded_template`` is ``None`` and ``invalid_interpolations`` lists them.
+    Preserves the structural distinction between literal source text (including
+    escaped ``\\$``) and parameter placeholders (1-based positional index).
     """
     open_d, _close = _DELIMITERS[kind]
     body = raw[len(open_d) : len(raw) - len(open_d)]
     single_quote_family = kind in _SINGLE_QUOTE_KINDS
 
-    out: list[str] = []
+    parts: list[tuple[str, str | int]] = []
+    lit_buf: list[str] = []
     param_order: list[str] = []
     param_index: dict[str, int] = {}
     invalid: list[Interpolation] = []
@@ -178,38 +178,43 @@ def decode_template(
     pos = 0
     n = len(body)
 
+    def flush_lit() -> None:
+        if lit_buf:
+            parts.append(("lit", "".join(lit_buf)))
+            lit_buf.clear()
+
     while pos < n:
         ch = body[pos]
 
         if ch == "\\":
             pos += 1
             if pos >= n:
-                out.append("\\")
+                lit_buf.append("\\")
                 break
             esc = body[pos]
             cur_col += 1
             if single_quote_family:
                 if esc in ("\\", "'"):
-                    out.append(esc)
+                    lit_buf.append(esc)
                 else:
-                    out.append("\\" + esc)
+                    lit_buf.append("\\" + esc)
             else:
                 if esc == "u" and pos + 4 < n and _is_hex4(body[pos + 1 : pos + 5]):
-                    out.append(chr(int(body[pos + 1 : pos + 5], 16)))
+                    lit_buf.append(chr(int(body[pos + 1 : pos + 5], 16)))
                     cur_col += 4
                     pos += 4
                 elif esc == "\n":
                     pass
                 elif esc in _ESCAPE_MAP:
-                    out.append(_ESCAPE_MAP[esc])
+                    lit_buf.append(_ESCAPE_MAP[esc])
                 else:
-                    out.append("\\" + esc)
+                    lit_buf.append("\\" + esc)
             pos += 1
             cur_col += 1
             continue
 
         if ch == "\n":
-            out.append(ch)
+            lit_buf.append(ch)
             pos += 1
             cur_line += 1
             cur_col = 1
@@ -226,15 +231,11 @@ def decode_template(
                 if name not in allowed_params:
                     invalid.append(Interpolation(interp_text, cur_line, cur_col))
                 else:
+                    flush_lit()
                     if name not in param_index:
                         param_order.append(name)
                         param_index[name] = len(param_order)
-                    idx = param_index[name]
-                    next_ch = body[end] if end < n else ""
-                    if next_ch.isalnum() or next_ch == "_":
-                        out.append(f"${{{idx}}}")
-                    else:
-                        out.append(f"${idx}")
+                    parts.append(("param", param_index[name]))
                 for c in body[pos:end]:
                     if c == "\n":
                         cur_line += 1
@@ -243,18 +244,39 @@ def decode_template(
                         cur_col += 1
                 pos = end
                 continue
-            out.append(ch)
+            lit_buf.append(ch)
             pos += 1
             cur_col += 1
             continue
 
-        out.append(ch)
+        lit_buf.append(ch)
         pos += 1
         cur_col += 1
 
+    flush_lit()
     if invalid:
         return None, (), invalid
-    return "".join(out), tuple(param_order), []
+    return tuple(parts), tuple(param_order), []
+
+
+def decode_template(
+    raw: str,
+    kind: str,
+    line: int,
+    col: int,
+    allowed_params: set[str] | frozenset[str] | dict[str, str],
+) -> tuple[str | None, tuple[str, ...], list[Interpolation]]:
+    """Decode a Groovy string, replacing bare allowed-parameter interpolations with ``${1}``, ``${2}``, ..."""
+    parts, param_order, invalid = decode_template_parts(
+        raw, kind, line, col, allowed_params
+    )
+    if parts is None:
+        return None, (), invalid
+    rendered = "".join(
+        str(val) if kind_tag == "lit" else f"${{{val}}}"
+        for kind_tag, val in parts
+    )
+    return rendered, param_order, []
 
 
 def _is_hex4(s: str) -> bool:

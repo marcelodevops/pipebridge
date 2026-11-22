@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .errors import PipebridgeError
 from .findings import PB_INTERP, PB_LIB_CALL, Finding
-from .groovystrings import decode_string, decode_template
+from .groovystrings import decode_string, decode_template_parts
 from .lexer import (
     COMMA,
     IDENT,
@@ -247,7 +247,14 @@ class Resolver:
             arg_values = (params[param_name],)
             bindings = {param_name: params[param_name]}
             step_counter += 1
-            script_text = 'printf \'%s\\n\' "$1"' if which == "echo" else '"$1"'
+            if which == "echo":
+                script_text = 'printf \'%s\\n\' "${1}"'
+            else:
+                # Execute parameter-supplied shell text via argv; assumes bash -eo pipefail.
+                script_text = (
+                    "# Parameter-supplied shell command passed via argv (assumes bash -eo pipefail).\n"
+                    'bash --noprofile --norc -eo pipefail -c "${1}"'
+                )
             res.operations.append(
                 Operation(
                     kind=which,
@@ -265,10 +272,10 @@ class Resolver:
             )
             return step_counter
 
-        template, param_order, invalid = decode_template(
+        parts, param_order, invalid = decode_template_parts(
             arg_tok.value, arg_tok.kind, arg_tok.line, arg_tok.col, params
         )
-        if template is None:
+        if parts is None:
             first_bad = invalid[0]
             res.blocked = True
             res.findings.append(_finding(PB_INTERP, f"Unsupported interpolation in library {which}: '{first_bad.text}'.", first_bad.line, first_bad.col, path=path, chain=chain))
@@ -280,9 +287,15 @@ class Resolver:
             step_counter += 1
             step_idx = step_counter
             if which == "echo":
-                template = _echo_template_script(template)
+                template = _echo_template_script(parts)
+            else:
+                template = "".join(
+                    str(val) if tag == "lit" else f"${{{val}}}"
+                    for tag, val in parts
+                )
         else:
             step_idx = 0
+            template = "".join(str(val) for _tag, val in parts)
         res.operations.append(
             Operation(
                 kind=which,
@@ -379,33 +392,18 @@ class Resolver:
         res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has no definition.", name_tok.line, name_tok.col, path=var.path, chain=chain))
 
 
-def _echo_template_script(template: str) -> str:
-    """Wrap a ``$N``-substituted echo template in ``printf '%s\\n' "..."``."""
+def _echo_template_script(parts: tuple[tuple[str, str | int], ...]) -> str:
+    """Wrap structured ``('lit', str)`` / ``('param', int)`` parts in ``printf '%s\\n' "..."``."""
     out: list[str] = ['printf \'%s\\n\' "']
-    i = 0
-    n = len(template)
-    while i < n:
-        ch = template[i]
-        if ch == "$":
-            if i + 1 < n and template[i + 1].isdigit():
-                j = i + 1
-                while j < n and template[j].isdigit():
-                    j += 1
-                out.append(template[i:j])
-                i = j
-                continue
-            if i + 2 < n and template[i + 1] == "{" and template[i + 2].isdigit():
-                end = template.find("}", i + 2)
-                if end != -1 and template[i + 2 : end].isdigit():
-                    out.append(template[i : end + 1])
-                    i = end + 1
-                    continue
-            out.append("\\$")
-        elif ch in ('\\', '"', '`'):
-            out.append("\\" + ch)
+    for tag, val in parts:
+        if tag == "param":
+            out.append(f"${{{val}}}")
         else:
-            out.append(ch)
-        i += 1
+            for ch in str(val):
+                if ch in ('\\', '"', '`', '$'):
+                    out.append("\\" + ch)
+                else:
+                    out.append(ch)
     out.append('"')
     return "".join(out)
 
