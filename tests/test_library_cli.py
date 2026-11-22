@@ -38,7 +38,8 @@ def _write_jf(path: Path, prelude: str, stages_body: str) -> Path:
     return path
 
 
-def test_cli_analyze_and_convert_mapped_resolution_and_deferred_status(tmp_path, capsys):
+def test_cli_analyze_and_convert_mapped_resolution_and_emission(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
     map_path = _write_map(tmp_path, {"build-lib": "build-lib"})
     (tmp_path / "build-lib" / "vars" / "publish.groovy").write_text(
         'def call(String label) { packageSources(label) }\n'
@@ -60,14 +61,14 @@ def test_cli_analyze_and_convert_mapped_resolution_and_deferred_status(tmp_path,
     )
 
     rc = main(["analyze", str(jf), "--format", "json", "--library-map", str(map_path)])
-    assert rc == 2
+    assert rc == 0
     out = capsys.readouterr().out
     report = json.loads(out)
-    assert report["exit_code"] == 2
+    assert report["exit_code"] == 0
     assert report["summary"]["blockers"] == 0
     libs = report["libraries"]
     assert libs["map_supplied"] is True
-    assert libs["conversion_deferred"] is True
+    assert libs["conversion_deferred"] is False
     assert libs["loaded"] == [
         {
             "name": "build-lib",
@@ -87,17 +88,18 @@ def test_cli_analyze_and_convert_mapped_resolution_and_deferred_status(tmp_path,
     assert call["chain"][0] == f"{jf}:publish@7:17"
     assert "publish.groovy:packageSources@" in call["chain"][1]
 
-    out_dir = tmp_path / "migration"
+    out_dir = Path("migration")
     rc_conv = main(["convert", str(jf), "--output", str(out_dir), "--library-map", str(map_path)])
-    assert rc_conv == 2
-    conv_out = capsys.readouterr().out
-    assert "deferred" in conv_out
+    assert rc_conv == 0
+    capsys.readouterr()
     wf = (out_dir / "workflow.yml").read_text(encoding="utf-8")
-    assert "if: false" in wf
+    assert "if: false" not in wf
+    assert "bash 'migration/scripts/build-lib/publish/packageSources-1.sh' 'packaged'" in wf
+    script_file = out_dir / "scripts" / "build-lib" / "publish" / "packageSources-1.sh"
+    assert script_file.read_text(encoding="utf-8") == "echo $1\n"
     md = (out_dir / "migration-report.md").read_text(encoding="utf-8")
     assert "## Libraries" in md
     assert "did not fetch repositories or execute Groovy" in md
-    assert "deferred library emission" in md
     assert "build-lib" in md
     assert "v1" in md
 
@@ -123,7 +125,7 @@ def test_cli_undeclared_library_isolation(tmp_path, capsys):
         "        }\n",
     )
     rc = main(["analyze", str(jf), "--format", "json", "--library-map", str(map_path)])
-    assert rc == 2
+    assert rc == 0
     report = json.loads(capsys.readouterr().out)
     assert [lib["name"] for lib in report["libraries"]["loaded"]] == ["build-lib"]
     assert any(

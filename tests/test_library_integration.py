@@ -83,9 +83,11 @@ def test_successful_resolution_and_forwarding(tmp_path):
     assert inv.operations[0].call_chain[0] == "ci/Jenkinsfile:publish@7:17"
     assert "publish.groovy:packageSources@" in inv.operations[0].call_chain[1]
 
-    # Conversion remains blocked until script emission exists.
+    # Fully supported sh/echo-only calls lower to runnable steps.
+    assert result.conversion_ready
     wf = generate_workflow(result, source_name="ci/Jenkinsfile")
-    assert "if: false" in wf
+    assert "if: false" not in wf
+    assert "bash 'scripts/build-lib/publish/packageSources-1.sh' 'packaged'" in wf
 
 
 def test_eligible_revision_recorded_in_inventory_and_assumption(tmp_path):
@@ -329,7 +331,7 @@ def test_non_library_python_build_workflow_bytes_unchanged():
     assert actual == expected
 
 
-def test_resolved_library_call_conversion_deferred_report_and_workflow(tmp_path):
+def test_resolved_library_call_conversion_ready_and_pending_deferred(tmp_path):
     lm = _write_map(tmp_path, {"build-lib": "build-lib"})
     (tmp_path / "build-lib" / "vars" / "greet.groovy").write_text(
         "def call() { sh 'echo hi' }\n",
@@ -344,22 +346,19 @@ def test_resolved_library_call_conversion_deferred_report_and_workflow(tmp_path)
         "        }\n",
     )
     result = analyze_source(source, library_map=lm, source_path="ci/Jenkinsfile")
-    # Static resolution succeeded, but conversion readiness is blocked/deferred.
     assert not result.has_blockers
-    assert result.library_emission_deferred
-    assert result.conversion_blocked
-    assert not result.conversion_ready
+    assert not result.library_emission_deferred
+    assert result.conversion_ready
+    assert not result.conversion_blocked
 
     report = build_report(result, source_path="ci/Jenkinsfile", validation=None)
-    assert report["exit_code"] == 2
-    md = render_markdown_report(report)
-    assert "deferred library emission" in md
-    assert "DISABLED (`if: false`)" in md
-    assert "**Exit code:** 2" in md
+    assert report["exit_code"] == 0
+    assert report["libraries"]["conversion_deferred"] is False
+    assert report["translated"][0]["steps"][0]["script_path"] == "scripts/build-lib/greet/call-1.sh"
 
     wf = generate_workflow(result, source_name="ci/Jenkinsfile")
-    assert "if: false" in wf
-    assert "[NOT MIGRATED] shared-library" in wf
+    assert "if: false" not in wf
+    assert "scripts/build-lib/greet/call-1.sh" in wf
 
 
 def test_identical_errors_at_identical_coordinates_in_two_files_preserved(tmp_path):
