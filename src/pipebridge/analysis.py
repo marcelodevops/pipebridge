@@ -81,6 +81,7 @@ def analyze_source(
     source_text: str,
     credential_map: CredentialMap | None = None,
     secrets_ready: bool = False,
+    library_map=None,
 ) -> AnalysisResult:
     """Parse and analyze a Jenkinsfile, producing ordered findings.
 
@@ -88,7 +89,7 @@ def analyze_source(
     a secret value.
     """
     sha = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-    parsed = parse(source_text)
+    parsed = parse(source_text, library_map=library_map)
     findings = list(parsed.findings)
     pipeline = parsed.pipeline
     inventory = parsed.credential_inventory

@@ -134,7 +134,8 @@ _IMPORT_KEYWORDS = frozenset(
 
 
 class _Parser:
-    def __init__(self, source: str) -> None:
+    def __init__(self, source: str, library_map=None) -> None:
+        self.library_map = library_map
         self._tokens = tokenize(source)
         self._pos = 0
         self._findings: list[Finding] = []
@@ -3226,5 +3227,5 @@ class _Parser:
         )
 
 
-def parse(source: str) -> ParseResult:
-    return _Parser(source).parse()
+def parse(source: str, library_map=None) -> ParseResult:
+    return _Parser(source, library_map=library_map).parse()
