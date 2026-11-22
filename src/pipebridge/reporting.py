@@ -55,6 +55,9 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
             },
         }
 
+    library_deferred = bool(getattr(analysis, "library_emission_deferred", False))
+    conversion_blocked = bool(blockers) or library_deferred
+
     return {
         "tool": {"name": "pipebridge", "version": __version__},
         "generated_at": datetime.datetime.now(datetime.timezone.utc)
@@ -62,7 +65,7 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
         .isoformat()
         .replace("+00:00", "Z"),
         "source": {"path": source_path, "sha256": analysis.source_sha256},
-        "exit_code": 2 if blockers else 0,
+        "exit_code": 2 if conversion_blocked else 0,
         "summary": {
             "blockers": len(blockers),
             "warnings": len(warnings),
@@ -236,6 +239,11 @@ def render_markdown_report(report: dict) -> str:
     if summary["blockers"]:
         lines.append(
             f"- **Result:** converted **with {summary['blockers']} blocker(s)** — "
+            "the generated job is DISABLED (`if: false`)"
+        )
+    elif report["exit_code"] != 0:
+        lines.append(
+            "- **Result:** converted **with deferred library emission** — "
             "the generated job is DISABLED (`if: false`)"
         )
     else:

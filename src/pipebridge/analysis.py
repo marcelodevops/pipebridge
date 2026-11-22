@@ -80,6 +80,20 @@ class AnalysisResult:
     def has_blockers(self) -> bool:
         return any(f.is_blocker for f in self.findings)
 
+    @property
+    def library_emission_deferred(self) -> bool:
+        return bool(
+            self.library_inventory.calls or self.library_inventory.operations
+        )
+
+    @property
+    def conversion_blocked(self) -> bool:
+        return self.has_blockers or self.library_emission_deferred
+
+    @property
+    def conversion_ready(self) -> bool:
+        return not self.conversion_blocked
+
 
 def analyze_source(
     source_text: str,
@@ -350,7 +364,7 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
     seen: set[tuple] = set()
     out: list[Finding] = []
     for f in findings:
-        key = (f.code, f.line, f.col, f.message)
+        key = (f.code, f.line, f.col, f.message, f.source_path, f.call_chain)
         if key not in seen:
             seen.add(key)
             out.append(f)

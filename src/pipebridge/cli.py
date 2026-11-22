@@ -187,7 +187,7 @@ def _cmd_convert(args) -> int:
     validation = validate_generated_workflow(
         workflow_text,
         targets[0],
-        disabled=bool(analysis.has_blockers),
+        disabled=bool(analysis.conversion_blocked),
     )
 
     # shellcheck notes are about the user's faithfully-migrated script:
@@ -235,6 +235,11 @@ def _cmd_convert(args) -> int:
         print(
             "The generated job is disabled with `if: false`; resolve every "
             "blocker in the report before enabling it."
+        )
+    elif int(report["exit_code"]) != 0:
+        print(
+            "The generated job is disabled with `if: false` because "
+            "shared-library script emission is deferred."
         )
     return int(report["exit_code"])
 
