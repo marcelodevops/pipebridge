@@ -354,3 +354,114 @@ def test_stash_helpers_overwrite_refusal_force_and_rollback(tmp_path, monkeypatc
     assert main(["convert", str(jf), "--output", str(out_dir), "--force"]) == 1
     assert "rolled back completely" in capsys.readouterr().err
     assert stash_helper.read_text(encoding="utf-8") == "# modified\n"
+
+
+def test_unstash_prevalidation_rejects_dir_leaf_file_parent_and_special_files(tmp_path):
+    unstash_py = tmp_path / "pipebridge_unstash.py"
+    unstash_py.write_text(UNSTASH_HELPER_SOURCE, encoding="utf-8")
+
+    # 1. Destination leaf is a directory (with valid sibling sorted before it).
+    ws1 = tmp_path / "ws1"
+    rt1 = tmp_path / "rt1"
+    ws1.mkdir()
+    (ws1 / "aaa_sibling.txt").write_text("SIBLING_ORIGINAL", encoding="utf-8")
+    (ws1 / "dir_leaf").mkdir()
+    s1 = rt1 / "pipebridge-stash" / "s1"
+    s1.mkdir(parents=True)
+    (s1 / "aaa_sibling.txt").write_text("OVERWRITTEN", encoding="utf-8")
+    (s1 / "dir_leaf").write_text("FILE_OVER_DIR", encoding="utf-8")
+
+    p1 = subprocess.run(
+        [sys.executable, str(unstash_py), "s1"],
+        env={"GITHUB_WORKSPACE": str(ws1), "RUNNER_TEMP": str(rt1)},
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    assert p1.returncode == 2
+    assert (ws1 / "aaa_sibling.txt").read_text(encoding="utf-8") == "SIBLING_ORIGINAL"
+    assert (ws1 / "dir_leaf").is_dir()
+    assert list((ws1 / "dir_leaf").iterdir()) == []
+
+    # 2. Destination parent is a regular file (with valid sibling sorted before it).
+    ws2 = tmp_path / "ws2"
+    rt2 = tmp_path / "rt2"
+    ws2.mkdir()
+    (ws2 / "aaa_sibling.txt").write_text("SIBLING_ORIGINAL", encoding="utf-8")
+    (ws2 / "parent_file").write_text("PARENT_ORIGINAL", encoding="utf-8")
+    s2 = rt2 / "pipebridge-stash" / "s2"
+    (s2 / "parent_file").mkdir(parents=True)
+    (s2 / "aaa_sibling.txt").write_text("OVERWRITTEN", encoding="utf-8")
+    (s2 / "parent_file" / "child.txt").write_text("CHILD", encoding="utf-8")
+
+    p2 = subprocess.run(
+        [sys.executable, str(unstash_py), "s2"],
+        env={"GITHUB_WORKSPACE": str(ws2), "RUNNER_TEMP": str(rt2)},
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    assert p2.returncode == 2
+    assert (ws2 / "aaa_sibling.txt").read_text(encoding="utf-8") == "SIBLING_ORIGINAL"
+    assert (ws2 / "parent_file").read_text(encoding="utf-8") == "PARENT_ORIGINAL"
+
+    # 3. Source entry is a FIFO (with valid sibling sorted before it).
+    if hasattr(os, "mkfifo"):
+        ws3 = tmp_path / "ws3"
+        rt3 = tmp_path / "rt3"
+        ws3.mkdir()
+        (ws3 / "aaa_sibling.txt").write_text("SIBLING_ORIGINAL", encoding="utf-8")
+        s3 = rt3 / "pipebridge-stash" / "s3"
+        s3.mkdir(parents=True)
+        (s3 / "aaa_sibling.txt").write_text("OVERWRITTEN", encoding="utf-8")
+        os.mkfifo(s3 / "zzz_fifo")
+
+        p3 = subprocess.run(
+            [sys.executable, str(unstash_py), "s3"],
+            env={"GITHUB_WORKSPACE": str(ws3), "RUNNER_TEMP": str(rt3)},
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        assert p3.returncode == 2
+        assert "non-regular" in p3.stderr
+        assert (ws3 / "aaa_sibling.txt").read_text(encoding="utf-8") == "SIBLING_ORIGINAL"
+
+        # 4. Destination leaf is a special file (FIFO) with valid sibling sorted before it.
+        ws4 = tmp_path / "ws4"
+        rt4 = tmp_path / "rt4"
+        ws4.mkdir()
+        (ws4 / "aaa_sibling.txt").write_text("SIBLING_ORIGINAL", encoding="utf-8")
+        os.mkfifo(ws4 / "zzz_fifo")
+        s4 = rt4 / "pipebridge-stash" / "s4"
+        s4.mkdir(parents=True)
+        (s4 / "aaa_sibling.txt").write_text("OVERWRITTEN", encoding="utf-8")
+        (s4 / "zzz_fifo").write_text("OVERWRITE_FIFO", encoding="utf-8")
+
+        p4 = subprocess.run(
+            [sys.executable, str(unstash_py), "s4"],
+            env={"GITHUB_WORKSPACE": str(ws4), "RUNNER_TEMP": str(rt4)},
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        assert p4.returncode == 2
+        assert (ws4 / "aaa_sibling.txt").read_text(encoding="utf-8") == "SIBLING_ORIGINAL"
+
+
+def test_unstash_copy_oserror_reports_diagnostic_and_exits_nonzero(tmp_path):
+    if os.geteuid() == 0:
+        return
+    unstash_py = tmp_path / "pipebridge_unstash.py"
+    unstash_py.write_text(UNSTASH_HELPER_SOURCE, encoding="utf-8")
+    ws = tmp_path / "ws"
+    rt = tmp_path / "rt"
+    ws.mkdir()
+    target_dir = ws / "locked"
+    target_dir.mkdir()
+    target_dir.chmod(0o555)
+    s = rt / "pipebridge-stash" / "s"
+    (s / "locked").mkdir(parents=True)
+    (s / "locked" / "file.txt").write_text("DATA", encoding="utf-8")
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(unstash_py), "s"],
+            env={"GITHUB_WORKSPACE": str(ws), "RUNNER_TEMP": str(rt)},
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        assert proc.returncode == 1
+        assert "failed restoring" in proc.stderr
+    finally:
+        target_dir.chmod(0o755)
