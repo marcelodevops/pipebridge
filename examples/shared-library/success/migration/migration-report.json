@@ -1,9 +1,9 @@
 {
   "tool": {
     "name": "pipebridge",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
-  "generated_at": "2026-11-22T20:29:03Z",
+  "generated_at": "2026-11-22T21:06:46Z",
   "source": {
     "path": "examples/shared-library/success/Jenkinsfile",
     "sha256": "623adc9f56a9df89076ea261ace58d088ed3fcdeb2c04795bdd097a6328dc85a"
@@ -61,7 +61,7 @@
       "line": 3,
       "col": 5,
       "suggestion": "Confirm each secret name matches the checklist exactly before enabling the workflow.",
-      "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy",
+      "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/release-v0.5.0-alpha/examples/shared-library/success/build-lib/vars/publish.groovy",
       "call_chain": [
         "examples/shared-library/success/Jenkinsfile:publish@7:17"
       ]
@@ -106,7 +106,7 @@
           "source_line": 10,
           "detail": "mkdir -p dist && printf %s \"${1}\" > dist/marker.txt",
           "script_path": "scripts/build-lib/publish/packageSources-1.sh",
-          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy",
+          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/release-v0.5.0-alpha/examples/shared-library/success/build-lib/vars/publish.groovy",
           "args": [
             "packaged"
           ]
@@ -116,13 +116,13 @@
           "source_line": 4,
           "detail": "test -n \"$NPM_TOKEN\" && printf %s ok > dist/seen.txt",
           "script_path": "scripts/build-lib/publish/call-1.sh",
-          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy"
+          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/release-v0.5.0-alpha/examples/shared-library/success/build-lib/vars/publish.groovy"
         },
         {
           "kind": "stash",
           "source_line": 6,
           "detail": "dist",
-          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy"
+          "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/release-v0.5.0-alpha/examples/shared-library/success/build-lib/vars/publish.groovy"
         }
       ]
     },
@@ -164,7 +164,7 @@
         "source_col": 5,
         "status": "resolved",
         "reason": null,
-        "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy",
+        "source_path": "/Users/mac/ops/repos/pipebridge/.worktrees/release-v0.5.0-alpha/examples/shared-library/success/build-lib/vars/publish.groovy",
         "call_chain": [
           "examples/shared-library/success/Jenkinsfile:publish@7:17"
         ]

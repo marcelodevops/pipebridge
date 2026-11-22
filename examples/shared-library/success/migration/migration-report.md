@@ -1,8 +1,8 @@
 # Migration report
 
 - **Source:** `examples/shared-library/success/Jenkinsfile` (sha256 `623adc9f56a9df89076ea261ace58d088ed3fcdeb2c04795bdd097a6328dc85a`)
-- **Tool:** pipebridge 0.4.0
-- **Generated:** 2026-11-22T20:29:03Z
+- **Tool:** pipebridge 0.5.0
+- **Generated:** 2026-11-22T21:06:46Z
 - **Result:** converted without blockers (review assumptions below)
 - **Exit code:** 0
 
@@ -99,7 +99,7 @@ None.
 - The generated workflow triggers on workflow_dispatch only.
 - **Next action:** Add push/pull_request/schedule triggers deliberately after review.
 
-### PB-ASSUME-CREDENTIALS — credential setup acknowledgement (/Users/mac/ops/repos/pipebridge/.worktrees/shared-lib-live-validation/examples/shared-library/success/build-lib/vars/publish.groovy, line 3, col 5)
+### PB-ASSUME-CREDENTIALS — credential setup acknowledgement (/Users/mac/ops/repos/pipebridge/.worktrees/release-v0.5.0-alpha/examples/shared-library/success/build-lib/vars/publish.groovy, line 3, col 5)
 
 - The user acknowledged that every secret named in the credential checklist exists in the target repository. pipebridge did not verify that and never reads secret values.
 - **Call chain:** `examples/shared-library/success/Jenkinsfile:publish@7:17`
