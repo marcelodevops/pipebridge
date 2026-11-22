@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .errors import PipebridgeError
 from .findings import PB_INTERP, PB_LIB_CALL, Finding
 from .groovystrings import decode_string
 from .lexer import (
@@ -42,7 +43,7 @@ LIBRARY_CALL_DEPTH_CAP = 20
 STRING_KINDS = (STRING_SQ, STRING_DQ, STRING_TS, STRING_TD)
 
 
-class LibraryResolutionError(Exception):
+class LibraryResolutionError(PipebridgeError):
     """Containment or read failure for a reached file (tool error, exit 1)."""
 
 
@@ -139,12 +140,12 @@ class Resolver:
         if call is None:
             res.blocked = True
             res.operations = []
-            res.findings.append(_finding(PB_LIB_CALL, f"Library file '{var.path}' has no call().", 1, 1, path=var.path, chain=(_label(var.path, call) if call else f"{var.path}:call@1:1",)))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library file '{var.path}' has no call().", 1, 1, path=var.path, chain=(root_frame, f"{var.path}:call@1:1")))
             return res
         if len(args) != len(call.params):
             res.blocked = True
             res.operations = []
-            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{var_name}' passed {len(args)} argument(s); call() requires {len(call.params)}.", call.span.line, call.span.col, path=var.path, chain=(_label(var.path, call),)))
+            res.findings.append(_finding(PB_LIB_CALL, f"Library call '{var_name}' passed {len(args)} argument(s); call() requires {len(call.params)}.", call.span.line, call.span.col, path=var.path, chain=(root_frame, _label(var.path, call))))
             return res
         self._expand(var, call, args, [], (root_frame,), res)
         if res.blocked:

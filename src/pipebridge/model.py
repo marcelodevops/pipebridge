@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from .findings import Finding
+
+if TYPE_CHECKING:
+    from .librarybody import Operation
 
 
 @dataclass(frozen=True)
@@ -112,10 +116,57 @@ class Pipeline:
 
 
 @dataclass
+class LoadedLibrary:
+    """One explicitly declared and mapped shared library."""
+
+    name: str
+    path: str
+    revision: str | None
+    span: Span
+    vars: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class LibraryCallRecord:
+    """One shared-library call encountered in a stage steps block.
+
+    Analysis state, not translated workflow content. Clearing a stage's
+    steps must not drop this record.
+    """
+
+    name: str
+    library: str | None
+    status: str  # 'resolved', 'pending', or 'blocked'
+    source_path: str | None
+    line: int
+    col: int
+    stage_name: str
+    chain: tuple[str, ...] = ()
+    operations: tuple["Operation", ...] = ()
+
+
+@dataclass
+class LibraryInventory:
+    """Append-only shared-library records and resolved operations."""
+
+    map_supplied: bool = False
+    libraries: list[LoadedLibrary] = field(default_factory=list)
+    calls: list[LibraryCallRecord] = field(default_factory=list)
+    operations: list["Operation"] = field(default_factory=list)
+
+    def by_name(self, name: str) -> LoadedLibrary | None:
+        for entry in self.libraries:
+            if entry.name == name:
+                return entry
+        return None
+
+
+@dataclass
 class ParseResult:
     pipeline: Pipeline | None
     findings: list[Finding]
     credential_inventory: CredentialInventory = field(default_factory=CredentialInventory)
+    library_inventory: LibraryInventory = field(default_factory=LibraryInventory)
 
     @property
     def has_blockers(self) -> bool:

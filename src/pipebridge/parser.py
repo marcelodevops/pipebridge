@@ -28,11 +28,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from .credentials import valid_credential_id, valid_variable
 from .errors import MalformedPipelineError
-from .findings import Finding, REGISTRY, PB_AGENT, PB_CRED, PB_ENVVAL, PB_GROOVY_IMPORT, PB_GROOVY_POSTLUDE, PB_GROOVY_PRELUDE, PB_INPUT, PB_INTERP, PB_LIB, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
+from .findings import Finding, REGISTRY, PB_AGENT, PB_ASSUME_LIBRARY, PB_CRED, PB_ENVVAL, PB_GROOVY_IMPORT, PB_GROOVY_POSTLUDE, PB_GROOVY_PRELUDE, PB_INPUT, PB_INTERP, PB_LIB, PB_LIB_CALL, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
 from .groovystrings import Decoded, decode_string
+from .librarybody import Resolver as LibraryBodyResolver
+from .librarymap import LIBRARY_NAME_RE, LibraryMap
+from .libraryresolver import discover_vars, unused_library_findings
 from .lexer import (
     ANNOTATION,
     COLON,
@@ -61,6 +65,9 @@ from .model import (
     CredentialBinding,
     CredentialInventory,
     EnvVar,
+    LibraryCallRecord,
+    LibraryInventory,
+    LoadedLibrary,
     ParseResult,
     Pipeline,
     Span,
@@ -134,8 +141,14 @@ _IMPORT_KEYWORDS = frozenset(
 
 
 class _Parser:
-    def __init__(self, source: str, library_map=None) -> None:
+    def __init__(
+        self,
+        source: str,
+        library_map: LibraryMap | None = None,
+        source_path: str | Path | None = None,
+    ) -> None:
         self.library_map = library_map
+        self.source_path = str(source_path) if source_path is not None else None
         self._tokens = tokenize(source)
         self._pos = 0
         self._findings: list[Finding] = []
@@ -147,6 +160,11 @@ class _Parser:
         self._diag_depth = 0
         self.pipeline: Pipeline | None = None
         self.inventory = CredentialInventory()
+        self.library_inventory = LibraryInventory(map_supplied=library_map is not None)
+        self._resolved_libraries: dict[str, LoadedLibrary] = {}
+        self._library_load_failed = False
+        self._library_resolver: LibraryBodyResolver | None = None
+        self._discovered_by_name: dict[str, list] = {}
         self._binding_seq = 0
         # Required-structure bookkeeping: which stages parsed a steps
         # section, and which of those sections were non-empty.
@@ -372,12 +390,17 @@ class _Parser:
             # Scripted pipeline (or arbitrary Groovy): classification
             # unchanged from previous releases. self._findings carries
             # exactly the one PB-SCRIPT blocker; no pipeline was parsed.
+            self.library_inventory = LibraryInventory(
+                map_supplied=self.library_map is not None
+            )
             return ParseResult(
                 pipeline=self.pipeline,
                 findings=self._findings,
                 credential_inventory=self.inventory,
+                library_inventory=self.library_inventory,
             )
 
+        self._prepare_library_resolver(buffered)
         self._parse_pipeline()
         if self.pipeline is not None:
             self._validate_required_structure()
@@ -387,13 +410,14 @@ class _Parser:
         # terminated at a parsed top-level pipeline block.
         self._findings.extend(buffered)
         self._findings.extend(postlude)
-        if any(
+        if self._library_load_failed or any(
             f.code in (PB_GROOVY_PRELUDE, PB_GROOVY_POSTLUDE)
             for f in self._findings
         ):
-            # Executable surrounding Groovy is a pipeline-level blocker: the
-            # draft becomes a named skeleton (stages extracted and listed,
-            # no steps translated) and is disabled like any other blocker.
+            # Executable surrounding Groovy or a library load-time failure is
+            # a pipeline-level blocker: the draft becomes a named skeleton
+            # (stages extracted and listed, no steps translated) and is
+            # disabled like any other blocker.
             self._mark_pipeline_blocked()
         # Source order keeps reports and diffs reviewable. The sort is stable,
         # so findings emitted at the same position keep their emission order.
@@ -403,7 +427,32 @@ class _Parser:
             pipeline=self.pipeline,
             findings=self._findings,
             credential_inventory=self.inventory,
+            library_inventory=self.library_inventory,
         )
+
+    def _prepare_library_resolver(self, buffered: list[Finding]) -> None:
+        """Restrict library discovery and resolution to declared, mapped libraries."""
+        if self.library_map is not None:
+            buffered.extend(
+                unused_library_findings(
+                    self.library_map, set(self._resolved_libraries.keys())
+                )
+            )
+        if not self._resolved_libraries or self.library_map is None:
+            return
+        restricted_map = LibraryMap(
+            entries={
+                name: self.library_map.entries[name]
+                for name in sorted(self._resolved_libraries)
+            }
+        )
+        discovered, disc_findings = discover_vars(restricted_map)
+        if disc_findings:
+            buffered.extend(disc_findings)
+            self._library_load_failed = True
+        self._library_resolver = LibraryBodyResolver(restricted_map, discovered)
+        for item in discovered:
+            self._discovered_by_name.setdefault(item.name, []).append(item)
 
     # ---- surrounding Groovy --------------------------------------------
 
@@ -527,18 +576,73 @@ class _Parser:
         if tok.kind == ANNOTATION:
             self._advance()
             if tok.value == "@Library":
-                # Existing stable behavior for shared libraries (unchanged).
-                buffered.append(
-                    self._make(
-                        PB_LIB,
-                        "shared library annotation",
-                        "Shared libraries are not supported by the MVP.",
-                        tok.line,
-                        tok.col,
-                        "Inline the library steps or migrate them manually; list every "
-                        "custom step used from the library.",
-                    )
+                parsed_lib = (
+                    self._parse_eligible_library_annotation()
+                    if self.library_map is not None
+                    else None
                 )
+                if (
+                    parsed_lib is not None
+                    and self.library_map is not None
+                    and parsed_lib[0] in self.library_map.entries
+                ):
+                    lib_name, lib_rev = parsed_lib
+                    if lib_name in self._resolved_libraries:
+                        buffered.append(
+                            self._make(
+                                PB_LIB_CALL,
+                                "shared library annotation",
+                                f"Library '{lib_name}' is declared more than once.",
+                                tok.line,
+                                tok.col,
+                                "Declare each shared library only once.",
+                            )
+                        )
+                        self._library_load_failed = True
+                    else:
+                        entry = self.library_map.entries[lib_name]
+                        loaded = LoadedLibrary(
+                            name=lib_name,
+                            path=str(entry.path),
+                            revision=lib_rev,
+                            span=Span(tok.line, tok.col),
+                        )
+                        self._resolved_libraries[lib_name] = loaded
+                        self.library_inventory.libraries.append(loaded)
+                        if lib_rev is not None:
+                            msg = (
+                                f"Local directory '{entry.path}' was used as library "
+                                f"'{lib_name}'. Annotated revision '{lib_rev}' was "
+                                "not fetched or checked."
+                            )
+                        else:
+                            msg = (
+                                f"Local directory '{entry.path}' was used as library "
+                                f"'{lib_name}'. Jenkins library resolution was not run."
+                            )
+                        buffered.append(
+                            self._make(
+                                PB_ASSUME_LIBRARY,
+                                "shared library annotation",
+                                msg,
+                                tok.line,
+                                tok.col,
+                                "Verify the local directory matches the intended Jenkins library.",
+                            )
+                        )
+                else:
+                    # Existing stable behavior for unmapped or unsupported @Library forms.
+                    buffered.append(
+                        self._make(
+                            PB_LIB,
+                            "shared library annotation",
+                            "Shared libraries are not supported by the MVP.",
+                            tok.line,
+                            tok.col,
+                            "Inline the library steps or migrate them manually; list every "
+                            "custom step used from the library.",
+                        )
+                    )
             else:
                 buffered.append(
                     self._make(
@@ -560,6 +664,42 @@ class _Parser:
         if tok.kind == IDENT:
             return self._scan_declaration_or_function(buffered)
         return False, None
+
+    def _parse_eligible_library_annotation(self) -> tuple[str, str | None] | None:
+        """Recognize ``@Library('name') _`` or ``@Library('name@rev') _``."""
+        t0 = self._peek(0)
+        t1 = self._peek(1)
+        t2 = self._peek(2)
+        t3 = self._peek(3)
+        t4 = self._peek(4)
+        if (
+            t0.kind != LPAREN
+            or t1.kind not in (STRING_SQ, STRING_DQ)
+            or t2.kind != RPAREN
+            or t3.kind != IDENT
+            or t3.value != "_"
+            or t4.kind not in (NEWLINE, SEMI, EOF)
+        ):
+            return None
+        dec = decode_string(t1.value, t1.kind, t1.line, t1.col)
+        if dec.has_interpolation or dec.value is None:
+            return None
+        raw = dec.value
+        if "@" in raw:
+            name, rev = raw.split("@", 1)
+            if (
+                not rev
+                or any(ch.isspace() for ch in rev)
+                or "'" in rev
+                or '"' in rev
+                or "@" in rev
+            ):
+                return None
+        else:
+            name, rev = raw, None
+        if LIBRARY_NAME_RE.fullmatch(name) is None:
+            return None
+        return name, rev
 
     def _scan_import_statement(self, buffered: list[Finding]) -> tuple[bool, tuple[int, int] | None]:
         """Recognize one ``import`` statement (documented, limited grammar):
@@ -1676,6 +1816,11 @@ class _Parser:
                 if stage.blocked:
                     self._diagnose_steps_remainder(stage.name)
                     return
+            elif self._resolved_libraries and self._library_resolver is not None:
+                self._parse_library_call(stage, tok, span)
+                if stage.blocked:
+                    self._diagnose_steps_remainder(stage.name)
+                    return
             else:
                 message = (
                     f"Step '{name}' is not supported by the MVP; the enclosing "
@@ -1700,6 +1845,190 @@ class _Parser:
                     self._skip_step_tail()
                 self._diagnose_steps_remainder(stage.name)
                 return
+
+    def _parse_library_call(self, stage: Stage, tok, span: Span) -> None:
+        """Parse and resolve one custom step against declared, mapped libraries."""
+        name = tok.value
+        caller_path = self.source_path or "Jenkinsfile"
+        root_frame = f"{caller_path}:{name}@{span.line}:{span.col}"
+        self._advance()  # consume step identifier
+
+        def fail_call(message: str, line: int, col: int) -> None:
+            self._findings.append(
+                Finding(
+                    code=PB_LIB_CALL,
+                    severity="blocker",
+                    construct=f"library call '{name}'",
+                    message=message,
+                    line=line,
+                    col=col,
+                    suggestion="Use literal string arguments in a supported shared-library call.",
+                    call_chain=(root_frame,),
+                )
+            )
+            self.library_inventory.calls.append(
+                LibraryCallRecord(
+                    name=name,
+                    library=None,
+                    status="blocked",
+                    source_path=caller_path,
+                    line=span.line,
+                    col=span.col,
+                    stage_name=stage.name,
+                    chain=(root_frame,),
+                    operations=(),
+                )
+            )
+            self._mark_stage_blocked(stage)
+            self._skip_step_tail()
+
+        if self._peek().kind != LPAREN:
+            fail_call(
+                f"Library call '{name}' requires parentheses '(...)'. Call chain: {root_frame}.",
+                span.line,
+                span.col,
+            )
+            return
+
+        self._advance()  # consume '('
+        args: list[str] = []
+        while True:
+            self._skip_newlines()
+            cur = self._peek()
+            if cur.kind == RPAREN:
+                if args:
+                    fail_call(
+                        f"Library call '{name}' has a trailing comma. Call chain: {root_frame}.",
+                        cur.line,
+                        cur.col,
+                    )
+                    return
+                self._advance()
+                break
+            if cur.kind in STRING_KINDS:
+                dec = decode_string(cur.value, cur.kind, cur.line, cur.col)
+                if dec.has_interpolation or dec.value is None:
+                    fail_call(
+                        f"Library call '{name}' argument {len(args) + 1} is not a literal string. Call chain: {root_frame}.",
+                        cur.line,
+                        cur.col,
+                    )
+                    return
+                args.append(dec.value)
+                self._advance()
+            else:
+                fail_call(
+                    f"Library call '{name}' argument {len(args) + 1} is not a literal string. Call chain: {root_frame}.",
+                    cur.line,
+                    cur.col,
+                )
+                return
+            self._skip_newlines()
+            sep = self._peek()
+            if sep.kind == COMMA:
+                self._advance()
+                continue
+            if sep.kind == RPAREN:
+                self._advance()
+                break
+            fail_call(
+                f"Library call '{name}' has a malformed argument list. Call chain: {root_frame}.",
+                sep.line,
+                sep.col,
+            )
+            return
+
+        after = self._peek()
+        if after.kind == SEMI:
+            self._advance()
+        elif after.kind not in (NEWLINE, RBRACE, EOF):
+            fail_call(
+                f"Library call '{name}' has unsupported trailing tokens. Call chain: {root_frame}.",
+                after.line,
+                after.col,
+            )
+            return
+
+        cands = self._discovered_by_name.get(name, [])
+        lib_name = (
+            cands[0].library
+            if len(cands) == 1
+            else next(iter(self._resolved_libraries))
+        )
+        res = self._library_resolver.resolve(
+            lib_name,
+            name,
+            args,
+            caller=(caller_path, span.line, span.col, name),
+        )
+
+        if res.blocked:
+            self._findings.extend(res.findings)
+            chain = (
+                res.findings[-1].call_chain
+                if res.findings and res.findings[-1].call_chain
+                else (root_frame,)
+            )
+            self.library_inventory.calls.append(
+                LibraryCallRecord(
+                    name=name,
+                    library=lib_name if cands else None,
+                    status="blocked",
+                    source_path=caller_path,
+                    line=span.line,
+                    col=span.col,
+                    stage_name=stage.name,
+                    chain=chain,
+                    operations=(),
+                )
+            )
+            self._mark_stage_blocked(stage)
+            return
+
+        loaded = self._resolved_libraries.get(lib_name)
+        if loaded is not None and name not in loaded.vars:
+            loaded.vars.append(name)
+
+        chain = (
+            res.operations[-1].call_chain
+            if res.operations and res.operations[-1].call_chain
+            else (root_frame,)
+        )
+        status = "pending" if res.pending else "resolved"
+        self.library_inventory.calls.append(
+            LibraryCallRecord(
+                name=name,
+                library=lib_name,
+                status=status,
+                source_path=caller_path,
+                line=span.line,
+                col=span.col,
+                stage_name=stage.name,
+                chain=chain,
+                operations=tuple(res.operations),
+            )
+        )
+        self.library_inventory.operations.extend(res.operations)
+
+        if res.pending:
+            pending_kinds = ", ".join(sorted({op.kind for op in res.operations if op.pending}))
+            self._findings.append(
+                Finding(
+                    code=PB_LIB_CALL,
+                    severity="blocker",
+                    construct=f"library call '{name}'",
+                    message=(
+                        f"Library call '{name}' contains pending operation(s) "
+                        f"({pending_kinds}) that are not yet supported for emission. "
+                        f"Call chain: {' -> '.join(chain)}."
+                    ),
+                    line=span.line,
+                    col=span.col,
+                    suggestion="Wait for stash/credential execution support or inline supported steps.",
+                    call_chain=chain,
+                )
+            )
+            self._mark_stage_blocked(stage)
 
     _CRED_SUGGESTION = (
         "Create GitHub Actions secrets and reference them explicitly "
@@ -3227,5 +3556,9 @@ class _Parser:
         )
 
 
-def parse(source: str, library_map=None) -> ParseResult:
-    return _Parser(source, library_map=library_map).parse()
+def parse(
+    source: str,
+    library_map: LibraryMap | None = None,
+    source_path: str | Path | None = None,
+) -> ParseResult:
+    return _Parser(source, library_map=library_map, source_path=source_path).parse()
