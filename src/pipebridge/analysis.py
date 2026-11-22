@@ -21,6 +21,7 @@ from .credentials import CredentialMap, resolve_credentials
 from .librarymap import LibraryMap
 from .model import CredentialInventory, LibraryInventory, Pipeline, Span
 from .parser import parse
+from .stash import validate_job_stashes
 
 # Jenkins-specific environment variables that have no value on GitHub
 # Actions runners. Referenced shell variables are preserved as-is but
@@ -114,6 +115,7 @@ def analyze_source(
     findings.extend(
         resolve_credentials(inventory, pipeline, credential_map, secrets_ready)
     )
+    findings.extend(validate_job_stashes(pipeline))
 
     if pipeline is not None:
         findings.extend(_standard_assumptions(pipeline))

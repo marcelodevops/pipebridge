@@ -48,6 +48,8 @@ class Step:
     credential_binding_ids: tuple[str, ...] = ()
     args: tuple[str, ...] = ()
     script_path: str | None = None
+    stash_includes: str | None = None
+    stash_excludes: str | None = None
     source_path: str | None = None
 
 

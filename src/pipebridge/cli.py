@@ -22,6 +22,7 @@ from .errors import PipebridgeError
 from .findings import Finding, PB_SHELLCHECK
 from .librarymap import load_library_map
 from .reporting import build_report, render_json_report, render_markdown_report
+from .stash import STASH_HELPER_SOURCE, UNSTASH_HELPER_SOURCE
 from .validation import validate_generated_workflow
 from .workflow import generate_workflow
 
@@ -278,48 +279,63 @@ def _cmd_convert(args) -> int:
 
 
 def _collect_library_scripts(analysis, output_dir: Path) -> list[tuple[Path, str]]:
-    """Collect deduplicated (target_path, content) pairs for surviving library steps."""
+    """Collect deduplicated (target_path, content) pairs for surviving library and stash steps."""
     pipeline = analysis.pipeline
     if pipeline is None or pipeline.blocked:
         return []
     script_items: list[tuple[Path, str]] = []
     seen: dict[Path, str] = {}
     resolved_out: Path | None = None
+
+    def add_rel_file(rel_str: str, content: str) -> None:
+        nonlocal resolved_out
+        if output_dir.is_absolute() or ".." in output_dir.parts:
+            raise PipebridgeError(
+                "--output must be a relative path under the working directory "
+                "when library scripts are emitted."
+            )
+        rel = Path(rel_str)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise PipebridgeError(
+                f"library script path escapes output directory: {rel_str}"
+            )
+        if resolved_out is None:
+            resolved_out = output_dir.resolve()
+        resolved_target = (resolved_out / rel).resolve()
+        try:
+            resolved_target.relative_to(resolved_out)
+        except ValueError as exc:
+            raise PipebridgeError(
+                f"library script path escapes output directory: {rel_str}"
+            ) from exc
+        target = output_dir / rel
+        if target in seen:
+            if seen[target] != content:
+                raise PipebridgeError(
+                    f"conflicting script content for {target}"
+                )
+        else:
+            seen[target] = content
+            script_items.append((target, content))
+
+    need_stash = False
+    need_unstash = False
     for stage in pipeline.stages:
         if stage.blocked:
             continue
         for step in stage.steps:
-            if step.script_path is None:
-                continue
-            if output_dir.is_absolute() or ".." in output_dir.parts:
-                raise PipebridgeError(
-                    "--output must be a relative path under the working directory "
-                    "when library scripts are emitted."
-                )
-            rel = Path(step.script_path)
-            if rel.is_absolute() or ".." in rel.parts:
-                raise PipebridgeError(
-                    f"library script path escapes output directory: {step.script_path}"
-                )
-            if resolved_out is None:
-                resolved_out = output_dir.resolve()
-            resolved_target = (resolved_out / rel).resolve()
-            try:
-                resolved_target.relative_to(resolved_out)
-            except ValueError as exc:
-                raise PipebridgeError(
-                    f"library script path escapes output directory: {step.script_path}"
-                ) from exc
-            target = output_dir / rel
-            body = (step.text.rstrip("\n") + "\n") if step.text else "\n"
-            if target in seen:
-                if seen[target] != body:
-                    raise PipebridgeError(
-                        f"conflicting script content for {target}"
-                    )
-            else:
-                seen[target] = body
-                script_items.append((target, body))
+            if step.kind == "stash":
+                need_stash = True
+            elif step.kind == "unstash":
+                need_unstash = True
+            elif step.script_path is not None:
+                body = (step.text.rstrip("\n") + "\n") if step.text else "\n"
+                add_rel_file(step.script_path, body)
+
+    if need_stash:
+        add_rel_file("scripts/pipebridge_stash.py", STASH_HELPER_SOURCE)
+    if need_unstash:
+        add_rel_file("scripts/pipebridge_unstash.py", UNSTASH_HELPER_SOURCE)
     return script_items
 
 

@@ -42,6 +42,7 @@ from .groovystrings import Decoded, decode_string
 from .librarybody import Resolver as LibraryBodyResolver
 from .librarymap import LIBRARY_NAME_RE, LibraryMap
 from .libraryresolver import discover_vars, unused_library_findings
+from .stash import parse_stash_tokens, parse_unstash_tokens, validate_job_stashes
 from .lexer import (
     ANNOTATION,
     COLON,
@@ -424,6 +425,7 @@ class _Parser:
             # (stages extracted and listed, no steps translated) and is
             # disabled like any other blocker.
             self._mark_pipeline_blocked()
+        self._validate_job_stashes()
         # Source order keeps reports and diffs reviewable. The sort is stable,
         # so findings emitted at the same position keep their emission order.
         self._apply_env_collisions()
@@ -434,6 +436,10 @@ class _Parser:
             credential_inventory=self.inventory,
             library_inventory=self.library_inventory,
         )
+
+    def _validate_job_stashes(self) -> None:
+        """Enforce single-job stash uniqueness and unstash-after-stash ordering."""
+        self._findings.extend(validate_job_stashes(self.pipeline))
 
     def _prepare_library_resolver(self, buffered: list[Finding]) -> None:
         """Restrict library discovery and resolution to declared, mapped libraries."""
@@ -1824,6 +1830,18 @@ class _Parser:
                 if stage.blocked:
                     self._diagnose_steps_remainder(stage.name)
                     return
+            elif name == "stash":
+                self._advance()
+                self._parse_stash(stage, span)
+                if stage.blocked:
+                    self._diagnose_steps_remainder(stage.name)
+                    return
+            elif name == "unstash":
+                self._advance()
+                self._parse_unstash(stage, span)
+                if stage.blocked:
+                    self._diagnose_steps_remainder(stage.name)
+                    return
             elif self._resolved_libraries and self._library_resolver is not None:
                 self._parse_library_call(stage, tok, span)
                 if stage.blocked:
@@ -2088,7 +2106,29 @@ class _Parser:
 
         for op in res.operations:
             op_binding_ids = tuple(binding_ids[idx] for idx in op.credential_refs)
-            if op.kind == "echo" and not op.args:
+            if op.kind == "stash":
+                stage.steps.append(
+                    Step(
+                        kind="stash",
+                        text=op.text or "",
+                        span=op.span or span,
+                        credential_binding_ids=op_binding_ids,
+                        stash_includes=op.args[0] if op.args else "",
+                        stash_excludes=op.args[1] if len(op.args) > 1 else None,
+                        source_path=str(op.path) if op.path is not None else None,
+                    )
+                )
+            elif op.kind == "unstash":
+                stage.steps.append(
+                    Step(
+                        kind="unstash",
+                        text=op.text or "",
+                        span=op.span or span,
+                        credential_binding_ids=op_binding_ids,
+                        source_path=str(op.path) if op.path is not None else None,
+                    )
+                )
+            elif op.kind == "echo" and not op.args:
                 stage.steps.append(
                     Step(
                         kind="echo",
@@ -2113,6 +2153,79 @@ class _Parser:
                         source_path=str(op.path) if op.path is not None else None,
                     )
                 )
+
+    def _parse_stash(self, stage: Stage, span: Span) -> None:
+        parsed, next_pos, err = parse_stash_tokens(self._tokens, self._pos)
+        if err is not None or parsed is None:
+            self._add(
+                PB_SYNTAX,
+                "stash step",
+                f"Unsupported stash step: {err or 'invalid syntax'}.",
+                span.line,
+                span.col,
+                "Use stash name: '<literal>', includes: '<glob>'[, excludes: '<glob>'].",
+            )
+            self._mark_stage_blocked(stage)
+            self._skip_step_tail()
+            return
+        self._pos = next_pos
+        after = self._peek()
+        if after.kind == SEMI:
+            self._advance()
+        elif after.kind not in (NEWLINE, RBRACE, EOF):
+            self._add(
+                PB_SYNTAX,
+                "stash step",
+                "stash step has unsupported trailing tokens.",
+                after.line,
+                after.col,
+                "Use stash name: '<literal>', includes: '<glob>'[, excludes: '<glob>'].",
+            )
+            self._mark_stage_blocked(stage)
+            self._skip_step_tail()
+            return
+        s_name, s_inc, s_exc = parsed
+        stage.steps.append(
+            Step(
+                kind="stash",
+                text=s_name,
+                span=span,
+                stash_includes=s_inc,
+                stash_excludes=s_exc,
+            )
+        )
+
+    def _parse_unstash(self, stage: Stage, span: Span) -> None:
+        u_name, next_pos, err = parse_unstash_tokens(self._tokens, self._pos)
+        if err is not None or u_name is None:
+            self._add(
+                PB_SYNTAX,
+                "unstash step",
+                f"Unsupported unstash step: {err or 'invalid syntax'}.",
+                span.line,
+                span.col,
+                "Use unstash '<literal>'.",
+            )
+            self._mark_stage_blocked(stage)
+            self._skip_step_tail()
+            return
+        self._pos = next_pos
+        after = self._peek()
+        if after.kind == SEMI:
+            self._advance()
+        elif after.kind not in (NEWLINE, RBRACE, EOF):
+            self._add(
+                PB_SYNTAX,
+                "unstash step",
+                "unstash step has unsupported trailing tokens.",
+                after.line,
+                after.col,
+                "Use unstash '<literal>'.",
+            )
+            self._mark_stage_blocked(stage)
+            self._skip_step_tail()
+            return
+        stage.steps.append(Step(kind="unstash", text=u_name, span=span))
 
     _CRED_SUGGESTION = (
         "Create GitHub Actions secrets and reference them explicitly "

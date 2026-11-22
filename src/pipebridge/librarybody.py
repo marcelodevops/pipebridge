@@ -38,6 +38,7 @@ from .libraryresolver import (
     load_var,
 )
 from .model import STATUS_PENDING, STATUS_UNSUPPORTED, Span
+from .stash import parse_stash_tokens, parse_unstash_tokens
 
 LIBRARY_CALL_DEPTH_CAP = 20
 
@@ -233,11 +234,27 @@ class Resolver:
                     stmt, var, defn, params, stack, res, chain, lib_name, step_counter, cred_refs
                 )
             elif first.kind == IDENT and first.value == "stash":
-                res.pending = True
-                res.operations.append(Operation(kind="stash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name, credential_refs=cred_refs))
+                parsed_stash, next_pos, err = parse_stash_tokens(stmt, 1)
+                if err is not None or parsed_stash is None:
+                    res.blocked = True
+                    res.findings.append(_finding(PB_LIB_CALL, err or "Invalid stash statement.", first.line, first.col, construct="stash step", path=var.path, chain=chain))
+                elif next_pos != len(stmt):
+                    res.blocked = True
+                    res.findings.append(_finding(PB_LIB_CALL, "stash has unsupported trailing tokens.", stmt[next_pos].line, stmt[next_pos].col, construct="stash step", path=var.path, chain=chain))
+                else:
+                    s_name, s_inc, s_exc = parsed_stash
+                    s_args = (s_inc, s_exc) if s_exc is not None else (s_inc,)
+                    res.operations.append(Operation(kind="stash", text=s_name, args=s_args, span=Span(first.line, first.col), path=var.path, pending=False, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name, credential_refs=cred_refs))
             elif first.kind == IDENT and first.value == "unstash":
-                res.pending = True
-                res.operations.append(Operation(kind="unstash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name, credential_refs=cred_refs))
+                u_name, next_pos, err = parse_unstash_tokens(stmt, 1)
+                if err is not None or u_name is None:
+                    res.blocked = True
+                    res.findings.append(_finding(PB_LIB_CALL, err or "Invalid unstash statement.", first.line, first.col, construct="unstash step", path=var.path, chain=chain))
+                elif next_pos != len(stmt):
+                    res.blocked = True
+                    res.findings.append(_finding(PB_LIB_CALL, "unstash has unsupported trailing tokens.", stmt[next_pos].line, stmt[next_pos].col, construct="unstash step", path=var.path, chain=chain))
+                else:
+                    res.operations.append(Operation(kind="unstash", text=u_name, span=Span(first.line, first.col), path=var.path, pending=False, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name, credential_refs=cred_refs))
             elif first.kind == IDENT and len(stmt) >= 2 and stmt[1].kind == LPAREN:
                 self._do_invocation(first, stmt, var, defn, params, stack, res, chain, lib_name, cred_refs)
             else:

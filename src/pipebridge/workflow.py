@@ -298,7 +298,35 @@ def _generate_steps(
                     f" # {CHECKOUT_ACTION_VERSION} (pinned to full commit SHA)"
                 )
                 continue
-            if step.script_path is not None:
+            if step.kind == "stash":
+                helper_ref = (
+                    (output_dir / "scripts/pipebridge_stash.py").as_posix()
+                    if output_dir is not None
+                    else "scripts/pipebridge_stash.py"
+                )
+                parts = [
+                    "python3",
+                    _expr_safe_shell_quote(helper_ref),
+                    _expr_safe_shell_quote(step.text),
+                    _expr_safe_shell_quote(step.stash_includes or ""),
+                ]
+                if step.stash_excludes is not None:
+                    parts.append(_expr_safe_shell_quote(step.stash_excludes))
+                command = " ".join(parts)
+            elif step.kind == "unstash":
+                helper_ref = (
+                    (output_dir / "scripts/pipebridge_unstash.py").as_posix()
+                    if output_dir is not None
+                    else "scripts/pipebridge_unstash.py"
+                )
+                command = " ".join(
+                    [
+                        "python3",
+                        _expr_safe_shell_quote(helper_ref),
+                        _expr_safe_shell_quote(step.text),
+                    ]
+                )
+            elif step.script_path is not None:
                 script_ref = (
                     (output_dir / step.script_path).as_posix()
                     if output_dir is not None
@@ -313,6 +341,18 @@ def _generate_steps(
             else:
                 command = escape_github_expressions(step.text)
             steps.append(f"        run: {_render_block(command, indent=8)}")
+    if not pipeline.blocked and any(
+        not stage.blocked and any(s.kind in ("stash", "unstash") for s in stage.steps)
+        for stage in pipeline.stages
+    ):
+        steps.extend(
+            [
+                "      - name: Remove pipebridge stash",
+                "        if: always()",
+                "        continue-on-error: true",
+                "        run: python3 -c 'import os, shutil; root=os.path.join(os.environ[\"RUNNER_TEMP\"], \"pipebridge-stash\"); shutil.rmtree(root, ignore_errors=True)'",
+            ]
+        )
     return steps
 
 
