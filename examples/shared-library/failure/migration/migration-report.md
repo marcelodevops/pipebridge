@@ -1,8 +1,8 @@
 # Migration report
 
 - **Source:** `examples/shared-library/failure/Jenkinsfile` (sha256 `0a04f3dd51aca3fef26c9b7622f374481ec71dd1f416f8b6dd00ebdeac3ccf99`)
-- **Tool:** pipebridge 0.4.0
-- **Generated:** 2026-11-22T20:29:03Z
+- **Tool:** pipebridge 0.5.0
+- **Generated:** 2026-11-22T21:06:46Z
 - **Result:** converted without blockers (review assumptions below)
 - **Exit code:** 0
 
