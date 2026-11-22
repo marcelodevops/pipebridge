@@ -11,6 +11,7 @@ from pipebridge.errors import PipebridgeError
 from pipebridge.librarybody import LibraryResolutionError
 from pipebridge.librarymap import load_library_map
 from pipebridge.parser import parse
+from pipebridge.reporting import build_report, render_markdown_report
 from pipebridge.workflow import generate_workflow
 
 
@@ -322,5 +323,98 @@ def test_non_library_python_build_workflow_bytes_unchanged():
     source = (example / "Jenkinsfile").read_text(encoding="utf-8")
     expected = (example / "migration" / "workflow.yml").read_text(encoding="utf-8")
     result = analyze_source(source)
+    assert result.conversion_ready
+    assert not result.conversion_blocked
     actual = generate_workflow(result, source_name="Jenkinsfile")
     assert actual == expected
+
+
+def test_resolved_library_call_conversion_deferred_report_and_workflow(tmp_path):
+    lm = _write_map(tmp_path, {"build-lib": "build-lib"})
+    (tmp_path / "build-lib" / "vars" / "greet.groovy").write_text(
+        "def call() { sh 'echo hi' }\n",
+        encoding="utf-8",
+    )
+    source = _pipeline(
+        "@Library('build-lib') _\n",
+        "        stage('Greet') {\n"
+        "            steps {\n"
+        "                greet()\n"
+        "            }\n"
+        "        }\n",
+    )
+    result = analyze_source(source, library_map=lm, source_path="ci/Jenkinsfile")
+    # Static resolution succeeded, but conversion readiness is blocked/deferred.
+    assert not result.has_blockers
+    assert result.library_emission_deferred
+    assert result.conversion_blocked
+    assert not result.conversion_ready
+
+    report = build_report(result, source_path="ci/Jenkinsfile", validation=None)
+    assert report["exit_code"] == 2
+    md = render_markdown_report(report)
+    assert "deferred library emission" in md
+    assert "DISABLED (`if: false`)" in md
+    assert "**Exit code:** 2" in md
+
+    wf = generate_workflow(result, source_name="ci/Jenkinsfile")
+    assert "if: false" in wf
+    assert "[NOT MIGRATED] shared-library" in wf
+
+
+def test_identical_errors_at_identical_coordinates_in_two_files_preserved(tmp_path):
+    lm = _write_map(tmp_path, {"lib-a": "lib-a", "lib-b": "lib-b"})
+    body = "def call() { nope() }\n"
+    (tmp_path / "lib-a" / "vars" / "stepA.groovy").write_text(body, encoding="utf-8")
+    (tmp_path / "lib-b" / "vars" / "stepB.groovy").write_text(body, encoding="utf-8")
+
+    source = _pipeline(
+        "@Library('lib-a') _\n@Library('lib-b') _\n",
+        "        stage('A') {\n"
+        "            steps {\n"
+        "                stepA()\n"
+        "            }\n"
+        "        }\n"
+        "        stage('B') {\n"
+        "            steps {\n"
+        "                stepB()\n"
+        "            }\n"
+        "        }\n",
+    )
+    result = analyze_source(source, library_map=lm, source_path="Jenkinsfile")
+    calls = [f for f in result.findings if f.code == F.PB_LIB_CALL]
+    assert len(calls) == 2
+    assert {Path(f.source_path).name for f in calls} == {"stepA.groovy", "stepB.groovy"}
+    assert len({(f.line, f.col, f.message) for f in calls}) == 1
+
+
+def test_same_failing_helper_reached_through_two_call_sites_preserved(tmp_path):
+    lm = _write_map(tmp_path, {"build-lib": "build-lib"})
+    (tmp_path / "build-lib" / "vars" / "publish.groovy").write_text(
+        "def call() { helper() }\n"
+        "def helper() { nope() }\n",
+        encoding="utf-8",
+    )
+    source = _pipeline(
+        "@Library('build-lib') _\n",
+        "        stage('One') {\n"
+        "            steps {\n"
+        "                publish()\n"
+        "            }\n"
+        "        }\n"
+        "        stage('Two') {\n"
+        "            steps {\n"
+        "                publish()\n"
+        "            }\n"
+        "        }\n",
+    )
+    result = analyze_source(source, library_map=lm, source_path="Jenkinsfile")
+    calls = [f for f in result.findings if f.code == F.PB_LIB_CALL]
+    assert len(calls) == 2
+    assert calls[0].source_path == calls[1].source_path
+    assert (calls[0].line, calls[0].col) == (calls[1].line, calls[1].col)
+    assert calls[0].message == calls[1].message
+    assert calls[0].call_chain != calls[1].call_chain
+    assert calls[0].call_chain[0].startswith("Jenkinsfile:publish@")
+    assert calls[1].call_chain[0].startswith("Jenkinsfile:publish@")
+
