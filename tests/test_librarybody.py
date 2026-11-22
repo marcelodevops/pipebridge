@@ -130,8 +130,8 @@ def test_pending_credentials_stash_unstash(tmp_path):
     assert kinds == ["sh", "stash", "unstash"]
     assert r.operations[0].credential_refs == (0,)
     assert len(r.credentials) == 1
-    assert r.pending
-    assert all(o.pending for o in r.operations[1:])
+    assert not r.pending
+    assert r.executable
 
 
 def test_transactional_zero_ops_on_later_failure(tmp_path):
@@ -216,8 +216,8 @@ def test_pending_not_executable(tmp_path):
     root, lm = make_lib(tmp_path)
     write(root, "publish", "def call() { sh 'ok'\nstash name: 'd', includes: '**'\n}\n")
     r = Resolver(lm).resolve("build-lib", "publish", [])
-    assert not r.executable
-    assert r.pending
+    assert r.executable
+    assert not r.pending
 
 
 def test_containment_root_raises(tmp_path, tmp_path_factory):

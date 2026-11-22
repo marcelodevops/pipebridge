@@ -214,11 +214,11 @@ def test_library_credentials_missing_invalid_collision_and_env_collision(tmp_pat
     assert any(f.code == F.PB_CRED and "collides" in f.message for f in res_env.findings)
 
 
-def test_library_credentials_preserved_when_stage_cleared_by_stash_or_blocker(tmp_path, monkeypatch, capsys):
+def test_library_credentials_preserved_when_stage_cleared_by_blocker(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     fixture_dir = Path(__file__).resolve().parent.parent / "examples" / "shared-library" / "success"
     out_dir = Path("mig-success")
-    # Even with --secrets-ready, stash/unstash keep exit 2, disabled YAML, and no scripts.
+    # With --secrets-ready and both maps, success fixture now exits 0 and emits enabled YAML.
     rc = main([
         "convert",
         str(fixture_dir / "Jenkinsfile"),
@@ -227,10 +227,11 @@ def test_library_credentials_preserved_when_stage_cleared_by_stash_or_blocker(tm
         "--credential-map", str(fixture_dir / "credential-map.json"),
         "--secrets-ready",
     ])
-    assert rc == 2
+    assert rc == 0
     capsys.readouterr()
-    assert "if: false" in (out_dir / "workflow.yml").read_text(encoding="utf-8")
-    assert not (out_dir / "scripts").exists()
+    assert "if: false" not in (out_dir / "workflow.yml").read_text(encoding="utf-8")
+    assert (out_dir / "scripts" / "pipebridge_stash.py").is_file()
+    assert (out_dir / "scripts" / "pipebridge_unstash.py").is_file()
 
     report = json.loads((out_dir / "migration-report.json").read_text(encoding="utf-8"))
     bindings = report["credentials"]["bindings"]

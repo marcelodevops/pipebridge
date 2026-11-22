@@ -179,7 +179,7 @@ def test_blocked_stage_emits_no_executable_library_scripts(tmp_path, monkeypatch
     assert not (out_dir / "scripts").exists()
 
 
-def test_pending_credentials_and_stash_retain_disabled_draft_and_exit_2(tmp_path, monkeypatch, capsys):
+def test_pending_credentials_without_secrets_ready_retain_disabled_draft_and_exit_2(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     fixture_dir = Path(__file__).resolve().parent.parent / "examples" / "shared-library" / "success"
     out_dir = Path("migration")
@@ -194,6 +194,7 @@ def test_pending_credentials_and_stash_retain_disabled_draft_and_exit_2(tmp_path
     assert rc == 2
     capsys.readouterr()
     assert "if: false" in (out_dir / "workflow.yml").read_text(encoding="utf-8")
+    # Publish stage is blocked by PB-CRED-MAP; Restore stage is blocked by missing earlier stash 'dist'.
     assert not (out_dir / "scripts").exists()
 
 
