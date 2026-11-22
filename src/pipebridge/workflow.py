@@ -332,7 +332,14 @@ def _generate_steps(
                     if output_dir is not None
                     else step.script_path
                 )
-                parts = ["bash", _expr_safe_shell_quote(script_ref)]
+                parts = [
+                    "bash",
+                    "--noprofile",
+                    "--norc",
+                    "-eo",
+                    "pipefail",
+                    _expr_safe_shell_quote(script_ref),
+                ]
                 for arg in step.args:
                     parts.append(_expr_safe_shell_quote(arg))
                 command = " ".join(parts)

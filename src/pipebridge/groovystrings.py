@@ -301,5 +301,13 @@ def _match_interpolation(body: str, pos: int) -> tuple[str, int] | None:
         end = pos + 1
         while end < n and (body[end].isalnum() or body[end] == "_"):
             end += 1
+        while (
+            end + 1 < n
+            and body[end] == "."
+            and (body[end + 1].isalpha() or body[end + 1] == "_")
+        ):
+            end += 1
+            while end < n and (body[end].isalnum() or body[end] == "_"):
+                end += 1
         return body[pos:end], end
     return None

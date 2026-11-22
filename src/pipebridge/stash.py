@@ -222,6 +222,46 @@ def _matches(pattern: str, rel_posix: str) -> bool:
     return _match_segments(pattern.split("/"), rel_posix.split("/"))
 
 
+def _can_descendant_match(pat_segs: list[str], dir_segs: list[str]) -> bool:
+    if not dir_segs:
+        return bool(pat_segs)
+    if not pat_segs:
+        return False
+    if pat_segs[0] == "**":
+        return _can_descendant_match(pat_segs[1:], dir_segs) or _can_descendant_match(
+            pat_segs, dir_segs[1:]
+        )
+    if pat_segs[0] == "*" or pat_segs[0] == dir_segs[0]:
+        return _can_descendant_match(pat_segs[1:], dir_segs[1:])
+    return False
+
+
+def _all_descendants_match(pat_segs: list[str], dir_segs: list[str]) -> bool:
+    if pat_segs == ["**"]:
+        return True
+    if not pat_segs or not dir_segs:
+        return False
+    if pat_segs[0] == "**":
+        return _all_descendants_match(pat_segs[1:], dir_segs) or _all_descendants_match(
+            pat_segs, dir_segs[1:]
+        )
+    if pat_segs[0] == "*" or pat_segs[0] == dir_segs[0]:
+        return _all_descendants_match(pat_segs[1:], dir_segs[1:])
+    return False
+
+
+def _symlink_dir_could_match(includes: str, excludes: str | None, rel_posix: str) -> bool:
+    dir_segs = rel_posix.split("/")
+    inc_segs = includes.split("/")
+    if not (_matches(includes, rel_posix) or _can_descendant_match(inc_segs, dir_segs)):
+        return False
+    if excludes is not None:
+        exc_segs = excludes.split("/")
+        if _all_descendants_match(exc_segs, dir_segs):
+            return False
+    return True
+
+
 def main(argv: list[str]) -> int:
     if len(argv) not in (2, 3):
         print("pipebridge-stash: usage: pipebridge_stash.py <name> <includes> [excludes]", file=sys.stderr)
@@ -265,7 +305,7 @@ def main(argv: list[str]) -> int:
             cand = cur_dir / dname
             if cand.is_symlink():
                 rel = cand.relative_to(workspace).as_posix()
-                if _matches(includes, rel) and (excludes is None or not _matches(excludes, rel)):
+                if _symlink_dir_could_match(includes, excludes, rel):
                     print(f"pipebridge-stash: symlink matched: {rel}", file=sys.stderr)
                     return 2
         for fname in filenames:
