@@ -80,12 +80,14 @@ GitHub Actions discovers workflows only under `.github/workflows/`. The live-val
 
 ### Operator secret setup (`NPM_TOKEN_GH`)
 
-Before dispatching `shared-library-success-example.yml`, create the example repository secret `NPM_TOKEN_GH` with a **synthetic test value** (never an actual token, never printed or committed, and never replacing an existing production secret):
+Before dispatching `shared-library-success-example.yml`, confirm `NPM_TOKEN_GH` is absent and then create it with a **synthetic test value** (never an actual token, never printed or committed, and never replacing an existing secret). Keep the listing and creation as separate steps so a failed listing cannot trigger a write:
 
 ```sh
-# Confirm NPM_TOKEN_GH does not already exist before creating it:
-gh secret list --repo marcelodevops/pipebridge | grep -w NPM_TOKEN_GH || \
-  gh secret set NPM_TOKEN_GH --repo marcelodevops/pipebridge
+# 1. Confirm the secret listing succeeds and NPM_TOKEN_GH is not already present:
+gh secret list --repo marcelodevops/pipebridge
+
+# 2. Only after confirming NPM_TOKEN_GH is absent, create it interactively:
+gh secret set NPM_TOKEN_GH --repo marcelodevops/pipebridge
 ```
 
 `gh secret set` prompts interactively for the synthetic value so it does not appear in shell history.
