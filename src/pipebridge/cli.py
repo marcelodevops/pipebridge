@@ -20,6 +20,7 @@ from .analysis import analyze_source
 from .credentials import load_credential_map
 from .errors import PipebridgeError
 from .findings import Finding, PB_SHELLCHECK
+from .librarymap import load_library_map
 from .reporting import build_report, render_json_report, render_markdown_report
 from .validation import validate_generated_workflow
 from .workflow import generate_workflow
@@ -56,6 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--format", choices=["text", "json"], default="text", help="output format"
     )
     _add_credential_args(p_analyze)
+    _add_library_arg(p_analyze)
 
     p_convert = sub.add_parser(
         "convert", help="generate workflow.yml and migration reports"
@@ -70,6 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="replace existing generated files (default: never overwrite)",
     )
     _add_credential_args(p_convert)
+    _add_library_arg(p_convert)
     return parser
 
 
@@ -87,6 +90,17 @@ def _add_credential_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Acknowledge that every secret named by the credential map exists "
             "in the target repository. Does not read or verify values."
+        ),
+    )
+
+
+def _add_library_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--library-map",
+        help=(
+            "JSON file mapping Jenkins shared-library names to local "
+            "directories. Paths only; pipebridge never fetches repositories "
+            "or executes Groovy."
         ),
     )
 
@@ -136,13 +150,23 @@ def _load_credential_map(args):
     return load_credential_map(Path(path_text))
 
 
+def _load_library_map(args):
+    path_text = getattr(args, "library_map", None)
+    if not path_text:
+        return None
+    return load_library_map(Path(path_text))
+
+
 def _cmd_analyze(args) -> int:
     credential_map = _load_credential_map(args)
+    library_map = _load_library_map(args)
     path, text = _read_source(args.jenkinsfile)
     analysis = analyze_source(
         text,
         credential_map=credential_map,
         secrets_ready=bool(args.secrets_ready),
+        library_map=library_map,
+        source_path=str(path),
     )
     report = build_report(analysis, source_path=str(path), validation=None)
     if args.format == "json":
@@ -160,11 +184,14 @@ _OUTPUT_FILES = ("workflow.yml", "migration-report.md", "migration-report.json")
 def _cmd_convert(args) -> int:
     # Structural map errors must fail before any artifact is written.
     credential_map = _load_credential_map(args)
+    library_map = _load_library_map(args)
     path, text = _read_source(args.jenkinsfile)
     analysis = analyze_source(
         text,
         credential_map=credential_map,
         secrets_ready=bool(args.secrets_ready),
+        library_map=library_map,
+        source_path=str(path),
     )
     workflow_text = generate_workflow(analysis, source_name=path.name)
 

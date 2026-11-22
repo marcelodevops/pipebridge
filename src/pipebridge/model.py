@@ -123,6 +123,7 @@ class LoadedLibrary:
     path: str
     revision: str | None
     span: Span
+    discovered_vars: list[str] = field(default_factory=list)
     vars: list[str] = field(default_factory=list)
 
 

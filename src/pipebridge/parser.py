@@ -453,6 +453,9 @@ class _Parser:
         self._library_resolver = LibraryBodyResolver(restricted_map, discovered)
         for item in discovered:
             self._discovered_by_name.setdefault(item.name, []).append(item)
+            loaded = self._resolved_libraries.get(item.library)
+            if loaded is not None and item.name not in loaded.discovered_vars:
+                loaded.discovered_vars.append(item.name)
 
     # ---- surrounding Groovy --------------------------------------------
 
