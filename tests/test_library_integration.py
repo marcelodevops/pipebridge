@@ -271,7 +271,9 @@ def test_pending_operations_clear_stage_and_retain_inventory(tmp_path):
     assert inv.calls[0].chain[0] == f"{jf_path}:publish@7:17"
     assert inv.calls[1].name == "unstash"
     assert inv.calls[1].status == "blocked"
-    assert [op.kind for op in inv.operations] == ["sh", "with-credentials", "stash"]
+    assert [op.kind for op in inv.operations] == ["sh", "sh", "stash"]
+    assert len(result.credential_inventory.entries) == 1
+    assert result.credential_inventory.entries[0].credential_id == "npm-token"
     assert any(f.code == F.PB_LIB_CALL and "pending operation" in f.message for f in result.findings)
 
 

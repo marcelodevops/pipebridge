@@ -124,13 +124,14 @@ def test_malformed_signature_not_resolvable(tmp_path):
 
 def test_pending_credentials_stash_unstash(tmp_path):
     root, lm = make_lib(tmp_path)
-    write(root, "publish", "def call() { withCredentials([]) { sh 'x' }\nstash name: 'd', includes: '**'\nunstash 'd'\n}\n")
+    write(root, "publish", "def call() { withCredentials([string(credentialsId: 'c', variable: 'V')]) { sh 'x' }\nstash name: 'd', includes: '**'\nunstash 'd'\n}\n")
     r = Resolver(lm).resolve("build-lib", "publish", [])
     kinds = [o.kind for o in r.operations]
-    assert "with-credentials" in kinds
-    assert "stash" in kinds
-    assert "unstash" in kinds
-    assert all(o.pending for o in r.operations)
+    assert kinds == ["sh", "stash", "unstash"]
+    assert r.operations[0].credential_refs == (0,)
+    assert len(r.credentials) == 1
+    assert r.pending
+    assert all(o.pending for o in r.operations[1:])
 
 
 def test_transactional_zero_ops_on_later_failure(tmp_path):
