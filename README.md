@@ -72,6 +72,7 @@ Produces:
 | `workflow.yml` | The generated GitHub Actions workflow (disabled with `if: false` when blockers exist) |
 | `migration-report.md` | Human-readable migration report |
 | `migration-report.json` | The same report as structured JSON with stable finding codes |
+| `scripts/` | Emitted only when shared-library steps or `stash`/`unstash` are lowered; must be committed alongside `workflow.yml` |
 
 pipebridge **never overwrites existing outputs by default**. Add `--force` to replace previously generated files.
 
@@ -111,7 +112,8 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 | Groovy interpolation `"… ${expr} …"`, `"… $var …"` | ❌ Blocked | `PB-INTERP` — dynamic behavior has no tested translation |
 | Triple-quoted strings `'''…'''`, `"""…"""` | ✅ Supported | Same rules as their single/double counterparts; newlines preserved |
 | `script { }` blocks and scripted pipelines | ❌ Blocked | `PB-SCRIPT` |
-| Shared libraries, custom steps | ❌ Blocked | `PB-LIB`, `PB-SYNTAX` |
+| Shared libraries (`@Library('name') _`, `@Library('name@rev') _`) with `--library-map` | ⚠️ With assumption | Resolves only explicitly declared, locally mapped libraries (`PB-ASSUME-LIBRARY`); never fetches repositories or executes Groovy. Supports `vars/*.groovy` `def call` / local helpers, `sh`, `echo`, literal/forwarded parameters, bounded `withCredentials`, and single-job `stash`/`unstash`. Without `--library-map`, or for unmapped/ineligible forms, keeps `PB-LIB`. See [`docs/shared-library-migration-design.md`](docs/shared-library-migration-design.md) |
+| `stash` / `unstash` (literal names, bounded globs) | ⚠️ Single-job only | Generates `scripts/pipebridge_stash.py` and `scripts/pipebridge_unstash.py` storing files under `$RUNNER_TEMP/pipebridge-stash/<name>` with a final `always()` cleanup step. Cross-job/matrix transfer and `allowEmpty` are not supported |
 | Literal `withCredentials([string(credentialsId: '…', variable: 'NAME')])` in `steps` | ⚠️ With acknowledgement | One `string` binding whose body is only `sh` / `echo` / `checkout scm`. `NAME` becomes a step `env` key whose value is `${{ secrets.MAPPED }}` from an explicit `--credential-map`. pipebridge never reads secret values. Without `--secrets-ready` the job stays disabled (`PB-CRED-SETUP`). See [`docs/v0.4.0-credential-bindings-design.md`](docs/v0.4.0-credential-bindings-design.md) |
 | `credentials()`, other `withCredentials` forms, nested bindings, dynamic IDs | ❌ Blocked | `PB-CRED` — not migrated; unsupported bodies stay opaque |
 | `parallel` / `matrix` | ❌ Blocked | `PB-PARALLEL`, `PB-MATRIX` |
@@ -256,6 +258,45 @@ pipebridge convert Jenkinsfile --output ./migration --force \
 ```
 
 When the pipeline is otherwise clean, that exits **0** and enables the job. An unsupported credential form stays `PB-CRED` either way.
+
+## Shared libraries and single-job stash
+
+To resolve `@Library('name') _` or `@Library('name@rev') _` declarations against local checkouts (without fetching repositories or executing Groovy), supply `--library-map`:
+
+```json
+{
+  "schema_version": 1,
+  "libraries": {
+    "build-lib": {
+      "path": "build-lib"
+    }
+  }
+}
+```
+
+`schema_version` must be `1`. Each key in `libraries` must full-match `^[A-Za-z][A-Za-z0-9_-]{0,63}$`, and `path` must be a relative path (no `.`, `..`, or backslashes) inside the map file's directory containing a `vars/` subdirectory. Undeclared map entries emit `PB-LIB-MAP-UNUSED` (info) and are never loaded.
+
+Analyze or convert with both maps:
+
+```sh
+pipebridge analyze examples/shared-library/success/Jenkinsfile --format json \
+  --library-map examples/shared-library/success/library-map.json \
+  --credential-map examples/shared-library/success/credential-map.json
+
+pipebridge convert examples/shared-library/success/Jenkinsfile \
+  --library-map examples/shared-library/success/library-map.json \
+  --credential-map examples/shared-library/success/credential-map.json \
+  --secrets-ready \
+  --output examples/shared-library/success/migration
+```
+
+When library scripts or `stash`/`unstash` helpers are emitted:
+
+- `--output` must be a relative path under the working directory with no `..` segments.
+- Generated files are placed under `<output>/scripts/<library>/<var>/<function>-<n>.sh`, `<output>/scripts/pipebridge_stash.py`, and `<output>/scripts/pipebridge_unstash.py`.
+- **Commit the entire `<output>/scripts/` tree alongside `workflow.yml`**, and do not set `defaults.run.working-directory`: the generated workflow invokes those relative script paths from `$GITHUB_WORKSPACE` after checkout.
+- Literal parameter values are passed as shell `argv` (never spliced into `.sh` files). `sh(param)` runs `bash --noprofile --norc -eo pipefail -c "${1}"`.
+- Single-job `stash` / `unstash` stores files under `$RUNNER_TEMP/pipebridge-stash/<name>` and requires `python3` and `bash` on the runner.
 
 ## Example migration
 
@@ -423,6 +464,8 @@ The report is explicit about what was and was not read.
 - Multi-file output replacement is staged with rollback, but is **not** crash-atomic: a process kill between the individual file renames can leave a partial set on disk. Handled failures (I/O errors) roll back byte-for-byte; if a rollback restoration itself fails, the rollback is incomplete — the original bytes remain in a recovery backup whose path is reported, and a human must restore it.
 - `actionlint` runs only when installed locally; the report says so explicitly either way. Its hosted-runner catalog does not include custom self-hosted labels, so that one unknown-label message is suppressed and listed in the report when a labeled `runs-on` list was generated. Other lint failures still reject the conversion. This is not evidence that the runner exists.
 - Generated workflows are **never executed** by pipebridge; "passes validation" means YAML parsing and linting only.
+- Shared-library migration is strictly static and local: only explicitly declared, `--library-map`-mapped libraries are loaded; repositories are never fetched and Groovy is never executed. Annotated revisions (`@rev`) are recorded as unverified assumptions (`PB-ASSUME-LIBRARY`).
+- Single-job `stash` / `unstash` stores files under `$RUNNER_TEMP/pipebridge-stash/<name>` and cannot transfer across jobs, matrix legs, or agents. It requires `bash` and `python3` on the runner; `sh(param)` assumes `bash --noprofile --norc -eo pipefail` semantics; and runtime `pipebridge_unstash.py` copy failures (`OSError`) fail non-zero without rolling back partial destination writes.
 - No confidence percentage: pipebridge reports facts, not vibes.
 
 ## Later phases (explicitly out of scope for this MVP)

@@ -35,6 +35,7 @@ REPORT_KEYS = {
     "assumptions",
     "translated",
     "credentials",
+    "libraries",
     "validation",
 }
 FINDING_KEYS = {"code", "severity", "construct", "message", "line", "col", "suggestion"}

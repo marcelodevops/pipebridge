@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 
 from .findings import (
     Finding,
@@ -17,8 +18,10 @@ from .findings import (
     PB_TRIGGER_MANUAL,
 )
 from .credentials import CredentialMap, resolve_credentials
-from .model import CredentialInventory, Pipeline, Span
+from .librarymap import LibraryMap
+from .model import CredentialInventory, LibraryInventory, Pipeline, Span
 from .parser import parse
+from .stash import validate_job_stashes
 
 # Jenkins-specific environment variables that have no value on GitHub
 # Actions runners. Referenced shell variables are preserved as-is but
@@ -64,6 +67,7 @@ class AnalysisResult:
         credential_inventory: CredentialInventory | None = None,
         credential_map_supplied: bool = False,
         secrets_ready: bool = False,
+        library_inventory: LibraryInventory | None = None,
     ) -> None:
         self.findings = findings
         self.pipeline = pipeline
@@ -71,16 +75,31 @@ class AnalysisResult:
         self.credential_inventory = credential_inventory or CredentialInventory()
         self.credential_map_supplied = credential_map_supplied
         self.secrets_ready = secrets_ready
+        self.library_inventory = library_inventory or LibraryInventory()
 
     @property
     def has_blockers(self) -> bool:
         return any(f.is_blocker for f in self.findings)
+
+    @property
+    def library_emission_deferred(self) -> bool:
+        return any(op.pending for op in self.library_inventory.operations)
+
+    @property
+    def conversion_blocked(self) -> bool:
+        return self.has_blockers or self.library_emission_deferred
+
+    @property
+    def conversion_ready(self) -> bool:
+        return not self.conversion_blocked
 
 
 def analyze_source(
     source_text: str,
     credential_map: CredentialMap | None = None,
     secrets_ready: bool = False,
+    library_map: LibraryMap | None = None,
+    source_path: str | Path | None = None,
 ) -> AnalysisResult:
     """Parse and analyze a Jenkinsfile, producing ordered findings.
 
@@ -88,13 +107,15 @@ def analyze_source(
     a secret value.
     """
     sha = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-    parsed = parse(source_text)
+    parsed = parse(source_text, library_map=library_map, source_path=source_path)
     findings = list(parsed.findings)
     pipeline = parsed.pipeline
     inventory = parsed.credential_inventory
+    library_inventory = parsed.library_inventory
     findings.extend(
         resolve_credentials(inventory, pipeline, credential_map, secrets_ready)
     )
+    findings.extend(validate_job_stashes(pipeline))
 
     if pipeline is not None:
         findings.extend(_standard_assumptions(pipeline))
@@ -109,6 +130,7 @@ def analyze_source(
         credential_inventory=inventory,
         credential_map_supplied=credential_map is not None,
         secrets_ready=secrets_ready,
+        library_inventory=library_inventory,
     )
 
 
@@ -342,7 +364,7 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
     seen: set[tuple] = set()
     out: list[Finding] = []
     for f in findings:
-        key = (f.code, f.line, f.col, f.message)
+        key = (f.code, f.line, f.col, f.message, f.source_path, f.call_chain)
         if key not in seen:
             seen.add(key)
             out.append(f)

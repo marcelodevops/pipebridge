@@ -792,6 +792,7 @@ def test_report_schema_and_exit_contract_unchanged(tmp_path):
         "assumptions",
         "translated",
         "credentials",
+        "libraries",
         "validation",
     }
     assert all(isinstance(code, str) for code in report["blockers"])

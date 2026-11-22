@@ -12,6 +12,8 @@ SEVERITY_INFO = "info"
 # and JSON consumed by other tooling.
 PB_SCRIPT = "PB-SCRIPT"
 PB_LIB = "PB-LIB"
+PB_LIB_CALL = "PB-LIB-CALL"
+PB_LIB_MAP_UNUSED = "PB-LIB-MAP-UNUSED"
 PB_CRED = "PB-CRED"
 PB_CRED_MAP = "PB-CRED-MAP"
 PB_CRED_SETUP = "PB-CRED-SETUP"
@@ -35,6 +37,7 @@ PB_SHELLCHECK = "PB-SHELLCHECK"
 PB_ASSUME_RUNNER = "PB-ASSUME-RUNNER"
 PB_ASSUME_RUNNER_LABEL = "PB-ASSUME-RUNNER-LABEL"
 PB_ASSUME_CHECKOUT = "PB-ASSUME-CHECKOUT"
+PB_ASSUME_LIBRARY = "PB-ASSUME-LIBRARY"
 PB_ASSUME_SHELL = "PB-ASSUME-SHELL"
 PB_TRIGGER_MANUAL = "PB-TRIGGER-MANUAL"
 PB_SINGLE_JOB = "PB-SINGLE-JOB"
@@ -45,6 +48,8 @@ PB_GROOVY_POSTLUDE = "PB-GROOVY-POSTLUDE"
 REGISTRY: dict[str, tuple[str, str]] = {
     PB_SCRIPT: (SEVERITY_BLOCKER, "Scripted pipeline syntax or script block"),
     PB_LIB: (SEVERITY_BLOCKER, "Shared library usage"),
+    PB_LIB_CALL: (SEVERITY_BLOCKER, "Shared library call or definition error"),
+    PB_LIB_MAP_UNUSED: (SEVERITY_INFO, "Library map entry is not declared"),
     PB_CRED: (SEVERITY_BLOCKER, "Credentials or credential bindings"),
     PB_CRED_MAP: (SEVERITY_BLOCKER, "Credential ID has no valid explicit secret mapping"),
     PB_CRED_SETUP: (SEVERITY_BLOCKER, "Mapped secrets have not been acknowledged"),
@@ -68,6 +73,7 @@ REGISTRY: dict[str, tuple[str, str]] = {
     PB_ASSUME_RUNNER: (SEVERITY_INFO, "Runner assumed ubuntu-latest"),
     PB_ASSUME_RUNNER_LABEL: (SEVERITY_INFO, "Jenkins agent label mapped to a self-hosted runner label"),
     PB_ASSUME_CHECKOUT: (SEVERITY_INFO, "checkout scm assumed to run in the migrated repository"),
+    PB_ASSUME_LIBRARY: (SEVERITY_INFO, "Local directory used as shared library without Jenkins resolution"),
     PB_ASSUME_SHELL: (SEVERITY_INFO, "Shell and execution-environment differences"),
     PB_TRIGGER_MANUAL: (SEVERITY_INFO, "Workflow triggers on workflow_dispatch only"),
     PB_SINGLE_JOB: (SEVERITY_INFO, "Sequential stages kept in one job to preserve workspace state"),
@@ -88,6 +94,8 @@ class Finding:
     line: int
     col: int
     suggestion: str
+    source_path: str | None = None
+    call_chain: tuple[str, ...] = ()
 
     @property
     def is_blocker(self) -> bool:

@@ -6,7 +6,7 @@ import datetime
 import json
 
 from . import __version__
-from .model import STATUS_RESOLVED, CredentialInventory
+from .model import STATUS_RESOLVED, CredentialInventory, LibraryInventory
 
 _TRUNCATE = 72
 
@@ -31,9 +31,18 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
             }
             if not stage.blocked:
                 for step in stage.steps:
-                    entry["steps"].append(
-                        {"kind": step.kind, "source_line": step.span.line, "detail": step.text}
-                    )
+                    step_entry: dict = {
+                        "kind": step.kind,
+                        "source_line": step.span.line,
+                        "detail": step.text,
+                    }
+                    if getattr(step, "script_path", None) is not None:
+                        step_entry["script_path"] = step.script_path
+                    if getattr(step, "source_path", None) is not None:
+                        step_entry["source_path"] = step.source_path
+                    if getattr(step, "args", ()):
+                        step_entry["args"] = list(step.args)
+                    entry["steps"].append(step_entry)
                     translated_steps += 1
             translated_stages.append(entry)
 
@@ -55,6 +64,9 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
             },
         }
 
+    library_deferred = bool(getattr(analysis, "library_emission_deferred", False))
+    conversion_blocked = bool(blockers) or library_deferred
+
     return {
         "tool": {"name": "pipebridge", "version": __version__},
         "generated_at": datetime.datetime.now(datetime.timezone.utc)
@@ -62,7 +74,7 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
         .isoformat()
         .replace("+00:00", "Z"),
         "source": {"path": source_path, "sha256": analysis.source_sha256},
-        "exit_code": 2 if blockers else 0,
+        "exit_code": 2 if conversion_blocked else 0,
         "summary": {
             "blockers": len(blockers),
             "warnings": len(warnings),
@@ -75,7 +87,41 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
         "assumptions": [f.code for f in infos],
         "translated": translated_stages,
         "credentials": _credentials_section(analysis),
+        "libraries": _libraries_section(analysis),
         "validation": validation,
+    }
+
+
+def _libraries_section(analysis) -> dict:
+    inventory = getattr(analysis, "library_inventory", None) or LibraryInventory()
+    loaded = [
+        {
+            "name": lib.name,
+            "path": lib.path,
+            "revision": lib.revision,
+            "discovered_vars": list(lib.discovered_vars),
+            "vars": list(lib.vars),
+        }
+        for lib in inventory.libraries
+    ]
+    calls = [
+        {
+            "name": call.name,
+            "status": call.status,
+            "source_path": call.source_path,
+            "line": call.line,
+            "col": call.col,
+            "chain": list(call.chain),
+        }
+        for call in inventory.calls
+    ]
+    return {
+        "map_supplied": bool(inventory.map_supplied),
+        "conversion_deferred": bool(
+            getattr(analysis, "library_emission_deferred", False)
+        ),
+        "loaded": loaded,
+        "calls": calls,
     }
 
 
@@ -84,20 +130,23 @@ def _credentials_section(analysis) -> dict:
     bindings = []
     grouped: dict[str, dict[str, list[str]]] = {}
     for entry in inventory.entries:
-        bindings.append(
-            {
-                "binding_id": entry.binding_id,
-                "binding_type": entry.binding_type,
-                "credential_id": entry.credential_id,
-                "variable": entry.variable,
-                "secret_name": entry.secret_name,
-                "stage": entry.stage_name,
-                "source_line": entry.span.line,
-                "source_col": entry.span.col,
-                "status": entry.status,
-                "reason": entry.reason,
-            }
-        )
+        row = {
+            "binding_id": entry.binding_id,
+            "binding_type": entry.binding_type,
+            "credential_id": entry.credential_id,
+            "variable": entry.variable,
+            "secret_name": entry.secret_name,
+            "stage": entry.stage_name,
+            "source_line": entry.span.line,
+            "source_col": entry.span.col,
+            "status": entry.status,
+            "reason": entry.reason,
+        }
+        if getattr(entry, "source_path", None) is not None:
+            row["source_path"] = entry.source_path
+        if getattr(entry, "call_chain", ()):
+            row["call_chain"] = list(entry.call_chain)
+        bindings.append(row)
         if entry.status == STATUS_RESOLVED and entry.secret_name:
             bucket = grouped.setdefault(
                 entry.secret_name, {"credential_ids": [], "variables": []}
@@ -207,7 +256,7 @@ def _md_cell(value: str | None, quote: bool = True) -> str:
 
 
 def _finding_dict(f) -> dict:
-    return {
+    item = {
         "code": f.code,
         "severity": f.severity,
         "construct": f.construct,
@@ -216,6 +265,11 @@ def _finding_dict(f) -> dict:
         "col": f.col,
         "suggestion": f.suggestion,
     }
+    if getattr(f, "source_path", None) is not None:
+        item["source_path"] = f.source_path
+    if getattr(f, "call_chain", ()):
+        item["call_chain"] = list(f.call_chain)
+    return item
 
 
 def render_json_report(report: dict) -> str:
@@ -236,6 +290,11 @@ def render_markdown_report(report: dict) -> str:
     if summary["blockers"]:
         lines.append(
             f"- **Result:** converted **with {summary['blockers']} blocker(s)** — "
+            "the generated job is DISABLED (`if: false`)"
+        )
+    elif report["exit_code"] != 0:
+        lines.append(
+            "- **Result:** converted **with deferred library emission** — "
             "the generated job is DISABLED (`if: false`)"
         )
     else:
@@ -282,6 +341,10 @@ def render_markdown_report(report: dict) -> str:
     if cred_lines:
         lines.extend(cred_lines)
 
+    lib_lines = _markdown_libraries(report.get("libraries") or {})
+    if lib_lines:
+        lines.extend(lib_lines)
+
     findings = report["findings"]
     for title, severity in (("Blockers", "blocker"), ("Warnings", "warning"), ("Assumptions", "info")):
         lines.append(f"## {title}")
@@ -297,6 +360,9 @@ def render_markdown_report(report: dict) -> str:
             )
             lines.append("")
             lines.append(f"- {f['message']}")
+            if f.get("call_chain"):
+                chain_text = " -> ".join(f["call_chain"])
+                lines.append(f"- **Call chain:** `{chain_text}`")
             lines.append(f"- **Next action:** {f['suggestion']}")
             lines.append("")
 
@@ -320,10 +386,73 @@ def render_markdown_report(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _markdown_libraries(libraries: dict) -> list[str]:
+    loaded = libraries.get("loaded") or []
+    calls = libraries.get("calls") or []
+    if not loaded and not calls:
+        return []
+    lines = [
+        "## Libraries",
+        "",
+        "Local library directories were used for static analysis only; pipebridge "
+        "did not fetch repositories or execute Groovy.",
+        "",
+    ]
+    if libraries.get("conversion_deferred"):
+        lines.append(
+            "Shared-library script emission is deferred; conversion remains "
+            "blocked (exit 2, `if: false`) even when static resolution succeeds."
+        )
+        lines.append("")
+    if loaded:
+        lines.extend(
+            [
+                "| Library | Local path | Revision (unverified) | Discovered vars | Reached vars |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for lib in loaded:
+            disc = ", ".join(lib.get("discovered_vars") or [])
+            reached = ", ".join(lib.get("vars") or [])
+            lines.append(
+                "| {name} | {path} | {rev} | {disc} | {reached} |".format(
+                    name=_md_cell(lib.get("name")),
+                    path=_md_cell(lib.get("path")),
+                    rev=_md_cell(lib.get("revision")),
+                    disc=_md_cell(disc or None),
+                    reached=_md_cell(reached or None),
+                )
+            )
+        lines.append("")
+    if calls:
+        lines.extend(
+            [
+                "| Call | Status | Source | Call chain |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for call in calls:
+            src_path = call.get("source_path") or "Jenkinsfile"
+            loc = f"{src_path}:{call.get('line')}:{call.get('col')}"
+            chain = " -> ".join(call.get("chain") or [])
+            lines.append(
+                "| {name} | {status} | {loc} | {chain} |".format(
+                    name=_md_cell(call.get("name")),
+                    status=call.get("status") or "—",
+                    loc=_md_cell(loc),
+                    chain=_md_cell(chain or None),
+                )
+            )
+        lines.append("")
+    return lines
+
+
 def _finding_location(f: dict) -> str:
     """Findings at line 0 point into the generated workflow, not the source."""
     if f["line"] == 0:
         return "(generated workflow)"
+    if f.get("source_path"):
+        return f"({f['source_path']}, line {f['line']}, col {f['col']})"
     return f"(line {f['line']}, col {f['col']})"
 
 

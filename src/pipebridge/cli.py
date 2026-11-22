@@ -20,7 +20,9 @@ from .analysis import analyze_source
 from .credentials import load_credential_map
 from .errors import PipebridgeError
 from .findings import Finding, PB_SHELLCHECK
+from .librarymap import load_library_map
 from .reporting import build_report, render_json_report, render_markdown_report
+from .stash import STASH_HELPER_SOURCE, UNSTASH_HELPER_SOURCE
 from .validation import validate_generated_workflow
 from .workflow import generate_workflow
 
@@ -56,6 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--format", choices=["text", "json"], default="text", help="output format"
     )
     _add_credential_args(p_analyze)
+    _add_library_arg(p_analyze)
 
     p_convert = sub.add_parser(
         "convert", help="generate workflow.yml and migration reports"
@@ -70,6 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="replace existing generated files (default: never overwrite)",
     )
     _add_credential_args(p_convert)
+    _add_library_arg(p_convert)
     return parser
 
 
@@ -87,6 +91,17 @@ def _add_credential_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Acknowledge that every secret named by the credential map exists "
             "in the target repository. Does not read or verify values."
+        ),
+    )
+
+
+def _add_library_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--library-map",
+        help=(
+            "JSON file mapping Jenkins shared-library names to local "
+            "directories. Paths only; pipebridge never fetches repositories "
+            "or executes Groovy."
         ),
     )
 
@@ -136,13 +151,23 @@ def _load_credential_map(args):
     return load_credential_map(Path(path_text))
 
 
+def _load_library_map(args):
+    path_text = getattr(args, "library_map", None)
+    if not path_text:
+        return None
+    return load_library_map(Path(path_text))
+
+
 def _cmd_analyze(args) -> int:
     credential_map = _load_credential_map(args)
+    library_map = _load_library_map(args)
     path, text = _read_source(args.jenkinsfile)
     analysis = analyze_source(
         text,
         credential_map=credential_map,
         secrets_ready=bool(args.secrets_ready),
+        library_map=library_map,
+        source_path=str(path),
     )
     report = build_report(analysis, source_path=str(path), validation=None)
     if args.format == "json":
@@ -160,19 +185,27 @@ _OUTPUT_FILES = ("workflow.yml", "migration-report.md", "migration-report.json")
 def _cmd_convert(args) -> int:
     # Structural map errors must fail before any artifact is written.
     credential_map = _load_credential_map(args)
+    library_map = _load_library_map(args)
     path, text = _read_source(args.jenkinsfile)
     analysis = analyze_source(
         text,
         credential_map=credential_map,
         secrets_ready=bool(args.secrets_ready),
+        library_map=library_map,
+        source_path=str(path),
     )
-    workflow_text = generate_workflow(analysis, source_name=path.name)
-
     output_dir = Path(args.output)
     if output_dir.exists() and not output_dir.is_dir():
         raise PipebridgeError(f"output path exists and is not a directory: {output_dir}")
 
-    targets = [output_dir / name for name in _OUTPUT_FILES]
+    script_items = _collect_library_scripts(analysis, output_dir)
+    workflow_text = generate_workflow(
+        analysis, source_name=path.name, output_dir=output_dir
+    )
+
+    targets = [output_dir / name for name in _OUTPUT_FILES] + [
+        target for target, _content in script_items
+    ]
     existing = [t for t in targets if t.exists()]
     if existing and not args.force:
         listing = ", ".join(str(t) for t in existing)
@@ -187,7 +220,7 @@ def _cmd_convert(args) -> int:
     validation = validate_generated_workflow(
         workflow_text,
         targets[0],
-        disabled=bool(analysis.has_blockers),
+        disabled=bool(analysis.conversion_blocked),
     )
 
     # shellcheck notes are about the user's faithfully-migrated script:
@@ -219,6 +252,7 @@ def _cmd_convert(args) -> int:
             (targets[0], workflow_text),
             (targets[1], markdown_text),
             (targets[2], json_text),
+            *script_items,
         ],
         protected=path,
     )
@@ -236,7 +270,73 @@ def _cmd_convert(args) -> int:
             "The generated job is disabled with `if: false`; resolve every "
             "blocker in the report before enabling it."
         )
+    elif int(report["exit_code"]) != 0:
+        print(
+            "The generated job is disabled with `if: false` because "
+            "shared-library script emission is deferred."
+        )
     return int(report["exit_code"])
+
+
+def _collect_library_scripts(analysis, output_dir: Path) -> list[tuple[Path, str]]:
+    """Collect deduplicated (target_path, content) pairs for surviving library and stash steps."""
+    pipeline = analysis.pipeline
+    if pipeline is None or pipeline.blocked:
+        return []
+    script_items: list[tuple[Path, str]] = []
+    seen: dict[Path, str] = {}
+    resolved_out: Path | None = None
+
+    def add_rel_file(rel_str: str, content: str) -> None:
+        nonlocal resolved_out
+        if output_dir.is_absolute() or ".." in output_dir.parts:
+            raise PipebridgeError(
+                "--output must be a relative path under the working directory "
+                "when library scripts are emitted."
+            )
+        rel = Path(rel_str)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise PipebridgeError(
+                f"library script path escapes output directory: {rel_str}"
+            )
+        if resolved_out is None:
+            resolved_out = output_dir.resolve()
+        resolved_target = (resolved_out / rel).resolve()
+        try:
+            resolved_target.relative_to(resolved_out)
+        except ValueError as exc:
+            raise PipebridgeError(
+                f"library script path escapes output directory: {rel_str}"
+            ) from exc
+        target = output_dir / rel
+        if target in seen:
+            if seen[target] != content:
+                raise PipebridgeError(
+                    f"conflicting script content for {target}"
+                )
+        else:
+            seen[target] = content
+            script_items.append((target, content))
+
+    need_stash = False
+    need_unstash = False
+    for stage in pipeline.stages:
+        if stage.blocked:
+            continue
+        for step in stage.steps:
+            if step.kind == "stash":
+                need_stash = True
+            elif step.kind == "unstash":
+                need_unstash = True
+            elif step.script_path is not None:
+                body = (step.text.rstrip("\n") + "\n") if step.text else "\n"
+                add_rel_file(step.script_path, body)
+
+    if need_stash:
+        add_rel_file("scripts/pipebridge_stash.py", STASH_HELPER_SOURCE)
+    if need_unstash:
+        add_rel_file("scripts/pipebridge_unstash.py", UNSTASH_HELPER_SOURCE)
+    return script_items
 
 
 def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> None:
@@ -289,6 +389,7 @@ def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> 
         # is registered BEFORE writing so a partial write that raises is
         # still removed by cleanup.
         for target, content in items:
+            target.parent.mkdir(parents=True, exist_ok=True)
             temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             staged.append((temp, target))
             temp.write_text(content, encoding="utf-8")
