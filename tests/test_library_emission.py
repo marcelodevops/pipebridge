@@ -104,7 +104,7 @@ def test_emission_executes_with_exact_bytes_ordering_and_repeated_calls(tmp_path
     assert helper_script.is_file()
     assert echo_script.is_file()
     helper_body = helper_script.read_text(encoding="utf-8")
-    assert "$1" in helper_body and "$2" in helper_body
+    assert "${1}" in helper_body and "${2}" in helper_body
     assert "secrets.EXAMPLE" not in helper_body
     assert "first" not in helper_body
     assert "second" not in helper_body
@@ -309,3 +309,110 @@ def test_rollback_restores_workflow_reports_and_scripts(tmp_path, monkeypatch, c
     assert wf_path.read_text(encoding="utf-8") == orig_wf
     assert script_path.read_text(encoding="utf-8") == orig_script
     assert not (out_dir / "scripts" / "build-lib" / "greet" / "call-2.sh").exists()
+
+
+def test_sh_param_multiword_and_failing_command_execution(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    map_path = _write_map(tmp_path, {"build-lib": "build-lib"})
+    (tmp_path / "build-lib" / "vars" / "runCmd.groovy").write_text(
+        "def call(String cmd) { sh(cmd) }\n",
+        encoding="utf-8",
+    )
+    multi_cmd = "printf 'ran:%s' 'ok' > multi.txt && printf 'done\\n'"
+    jf_ok = _write_jf(
+        tmp_path / "Jenkinsfile.ok",
+        "@Library('build-lib') _\n",
+        "        stage('Multi') {\n"
+        "            steps {\n"
+        f'                runCmd("{multi_cmd}")\n'
+        "            }\n"
+        "        }\n",
+    )
+    out_ok = Path("mig-ok")
+    assert main(["convert", str(jf_ok), "--output", str(out_ok), "--library-map", str(map_path)]) == 0
+    capsys.readouterr()
+
+    script_text = (out_ok / "scripts" / "build-lib" / "runCmd" / "call-1.sh").read_text(encoding="utf-8")
+    assert "multi.txt" not in script_text
+    assert 'bash --noprofile --norc -eo pipefail -c "${1}"' in script_text
+
+    proc_ok = _run_workflow_steps((out_ok / "workflow.yml").read_text(encoding="utf-8"), tmp_path)
+    assert proc_ok.returncode == 0, proc_ok.stderr
+    assert proc_ok.stdout == "done\n"
+    assert (tmp_path / "multi.txt").read_text(encoding="utf-8") == "ran:ok"
+
+    jf_fail = _write_jf(
+        tmp_path / "Jenkinsfile.fail",
+        "@Library('build-lib') _\n",
+        "        stage('Fail') {\n"
+        "            steps {\n"
+        "                runCmd('exit 9')\n"
+        "                sh 'touch should_not_exist.txt'\n"
+        "            }\n"
+        "        }\n",
+    )
+    out_fail = Path("mig-fail")
+    assert main(["convert", str(jf_fail), "--output", str(out_fail), "--library-map", str(map_path)]) == 0
+    capsys.readouterr()
+    proc_fail = _run_workflow_steps((out_fail / "workflow.yml").read_text(encoding="utf-8"), tmp_path)
+    assert proc_fail.returncode == 9
+    assert not (tmp_path / "should_not_exist.txt").exists()
+
+
+def test_ten_plus_distinct_interpolated_parameters_execution(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    map_path = _write_map(tmp_path, {"build-lib": "build-lib"})
+    params_sig = ", ".join(f"String p{i}" for i in range(1, 12))
+    interp_body = "|".join(f"${{p{i}}}" for i in range(1, 12))
+    (tmp_path / "build-lib" / "vars" / "many.groovy").write_text(
+        f'def call({params_sig}) {{ sh "printf \'%s\\\\n\' \\"{interp_body}\\"" }}\n',
+        encoding="utf-8",
+    )
+    call_args = ", ".join(f"'v{i}'" for i in range(1, 12))
+    jf = _write_jf(
+        tmp_path / "Jenkinsfile",
+        "@Library('build-lib') _\n",
+        "        stage('Many') {\n"
+        "            steps {\n"
+        f"                many({call_args})\n"
+        "            }\n"
+        "        }\n",
+    )
+    out_dir = Path("mig-many")
+    assert main(["convert", str(jf), "--output", str(out_dir), "--library-map", str(map_path)]) == 0
+    capsys.readouterr()
+
+    script_text = (out_dir / "scripts" / "build-lib" / "many" / "call-1.sh").read_text(encoding="utf-8")
+    assert "${10}" in script_text and "${11}" in script_text
+
+    proc = _run_workflow_steps((out_dir / "workflow.yml").read_text(encoding="utf-8"), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "|".join(f"v{i}" for i in range(1, 12)) + "\n"
+
+
+def test_echo_preserves_literal_dollar_digits_alongside_param(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    map_path = _write_map(tmp_path, {"build-lib": "build-lib"})
+    (tmp_path / "build-lib" / "vars" / "say.groovy").write_text(
+        'def call(String msg) { echo "lit=\\$1 braced=\\${1} param=${msg}" }\n',
+        encoding="utf-8",
+    )
+    jf = _write_jf(
+        tmp_path / "Jenkinsfile",
+        "@Library('build-lib') _\n",
+        "        stage('Say') {\n"
+        "            steps {\n"
+        "                say('VALUE')\n"
+        "            }\n"
+        "        }\n",
+    )
+    out_dir = Path("mig-say")
+    assert main(["convert", str(jf), "--output", str(out_dir), "--library-map", str(map_path)]) == 0
+    capsys.readouterr()
+
+    script_text = (out_dir / "scripts" / "build-lib" / "say" / "call-1.sh").read_text(encoding="utf-8")
+    assert script_text == 'printf \'%s\\n\' "lit=\\$1 braced=\\${1} param=${1}"\n'
+
+    proc = _run_workflow_steps((out_dir / "workflow.yml").read_text(encoding="utf-8"), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "lit=$1 braced=${1} param=VALUE\n"

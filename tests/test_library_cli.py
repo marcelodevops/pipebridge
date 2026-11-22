@@ -96,7 +96,7 @@ def test_cli_analyze_and_convert_mapped_resolution_and_emission(tmp_path, monkey
     assert "if: false" not in wf
     assert "bash 'migration/scripts/build-lib/publish/packageSources-1.sh' 'packaged'" in wf
     script_file = out_dir / "scripts" / "build-lib" / "publish" / "packageSources-1.sh"
-    assert script_file.read_text(encoding="utf-8") == "echo $1\n"
+    assert script_file.read_text(encoding="utf-8") == "echo ${1}\n"
     md = (out_dir / "migration-report.md").read_text(encoding="utf-8")
     assert "## Libraries" in md
     assert "did not fetch repositories or execute Groovy" in md
