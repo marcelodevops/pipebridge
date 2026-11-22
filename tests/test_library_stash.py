@@ -465,3 +465,47 @@ def test_unstash_copy_oserror_reports_diagnostic_and_exits_nonzero(tmp_path):
         assert "failed restoring" in proc.stderr
     finally:
         target_dir.chmod(0o755)
+
+
+def test_stash_symlink_directory_descendant_detection_and_exclusions(tmp_path):
+    stash_py = tmp_path / "pipebridge_stash.py"
+    stash_py.write_text(STASH_HELPER_SOURCE, encoding="utf-8")
+
+    ws = tmp_path / "ws"
+    rt = tmp_path / "rt"
+    outside = tmp_path / "outside"
+    (ws / "dist" / "real").mkdir(parents=True)
+    (ws / "dist" / "real" / "file").write_text("REAL_BYTES", encoding="utf-8")
+    outside.mkdir()
+    (outside / "secret.txt").write_text("OUTSIDE_SECRET", encoding="utf-8")
+    (ws / "dist" / "link").symlink_to(outside)
+    rt.mkdir()
+    env = {"GITHUB_WORKSPACE": str(ws), "RUNNER_TEMP": str(rt)}
+
+    # 1. Exact repro: includes 'dist/*/*' must reject symlinked dir 'dist/link' before creating stash.
+    p_repro = subprocess.run(
+        [sys.executable, str(stash_py), "s_repro", "dist/*/*"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert p_repro.returncode == 2
+    assert "symlink matched" in p_repro.stderr
+    assert not (rt / "pipebridge-stash" / "s_repro").exists()
+    assert (outside / "secret.txt").read_text(encoding="utf-8") == "OUTSIDE_SECRET"
+
+    # 2. Unrelated symlink dir ('dist/real/*' does not match 'dist/link') -> succeeds.
+    p_unrel = subprocess.run(
+        [sys.executable, str(stash_py), "s_unrel", "dist/real/*"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert p_unrel.returncode == 0, p_unrel.stderr
+    assert (rt / "pipebridge-stash" / "s_unrel" / "dist" / "real" / "file").read_text(encoding="utf-8") == "REAL_BYTES"
+    assert not (rt / "pipebridge-stash" / "s_unrel" / "dist" / "link").exists()
+
+    # 3. Excluded symlink dir ('dist/link/**' excludes all descendants of 'dist/link') -> succeeds.
+    p_excl = subprocess.run(
+        [sys.executable, str(stash_py), "s_excl", "dist/*/*", "dist/link/**"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert p_excl.returncode == 0, p_excl.stderr
+    assert (rt / "pipebridge-stash" / "s_excl" / "dist" / "real" / "file").read_text(encoding="utf-8") == "REAL_BYTES"
+    assert not (rt / "pipebridge-stash" / "s_excl" / "dist" / "link").exists()

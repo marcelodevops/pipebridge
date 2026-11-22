@@ -87,7 +87,7 @@ def test_successful_resolution_and_forwarding(tmp_path):
     assert result.conversion_ready
     wf = generate_workflow(result, source_name="ci/Jenkinsfile")
     assert "if: false" not in wf
-    assert "bash 'scripts/build-lib/publish/packageSources-1.sh' 'packaged'" in wf
+    assert "bash --noprofile --norc -eo pipefail 'scripts/build-lib/publish/packageSources-1.sh' 'packaged'" in wf
 
 
 def test_eligible_revision_recorded_in_inventory_and_assumption(tmp_path):

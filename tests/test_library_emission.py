@@ -417,3 +417,102 @@ def test_echo_preserves_literal_dollar_digits_alongside_param(tmp_path, monkeypa
     proc = _run_workflow_steps((out_dir / "workflow.yml").read_text(encoding="utf-8"), tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "lit=$1 braced=${1} param=VALUE\n"
+
+
+def test_generated_script_enforces_errexit_and_pipefail_inside_child_shell(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    map_path = _write_map(tmp_path, {"build-lib": "build-lib"})
+    (tmp_path / "build-lib" / "vars" / "failEarly.groovy").write_text(
+        "def call() { sh 'false; printf SHOULD_NOT_RUN' }\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "build-lib" / "vars" / "failPipe.groovy").write_text(
+        "def call() { sh 'false | true; printf SHOULD_NOT_RUN_PIPE' }\n",
+        encoding="utf-8",
+    )
+
+    for var_name, marker in (("failEarly", "SHOULD_NOT_RUN"), ("failPipe", "SHOULD_NOT_RUN_PIPE")):
+        jf = _write_jf(
+            tmp_path / f"Jenkinsfile.{var_name}",
+            "@Library('build-lib') _\n",
+            f"        stage('{var_name}') {{\n"
+            "            steps {\n"
+            f"                {var_name}()\n"
+            "                sh 'touch should_not_exist.txt'\n"
+            "            }\n"
+            "        }\n",
+        )
+        out_dir = Path(f"mig-{var_name}")
+        assert main(["convert", str(jf), "--output", str(out_dir), "--library-map", str(map_path)]) == 0
+        capsys.readouterr()
+
+        data = yaml.safe_load((out_dir / "workflow.yml").read_text(encoding="utf-8"))
+        run_steps = [s["run"] for s in data["jobs"]["migrated-pipeline"]["steps"][1:] if "run" in s]
+        # Execute the actual generated run command in plain bash (without outer -eo pipefail)
+        # to prove the generated `bash --noprofile --norc -eo pipefail ...` enforces errexit/pipefail.
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", run_steps[0]],
+            cwd=tmp_path, capture_output=True, text=True, check=False,
+        )
+        assert proc.returncode != 0
+        assert marker not in proc.stdout
+        assert not (tmp_path / "should_not_exist.txt").exists()
+
+
+def test_unbraced_dotted_property_interpolation_rejected_with_pb_interp(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    map_path = _write_map(tmp_path, {"build-lib": "build-lib"})
+    (tmp_path / "build-lib" / "vars" / "badEcho.groovy").write_text(
+        'def call(String x) { echo "$x.length" }\n', encoding="utf-8"
+    )
+    (tmp_path / "build-lib" / "vars" / "badSh.groovy").write_text(
+        'def call(String x) { sh "echo $x.foo.bar" }\n', encoding="utf-8"
+    )
+    (tmp_path / "build-lib" / "vars" / "good.groovy").write_text(
+        'def call(String x) {\n'
+        '    echo "$x"\n'
+        '    echo "${x}.length"\n'
+        '    echo "Hello $x."\n'
+        '    echo "\\$x.length"\n'
+        '}\n',
+        encoding="utf-8",
+    )
+
+    for bad in ("badEcho", "badSh"):
+        jf = _write_jf(
+            tmp_path / f"Jenkinsfile.{bad}",
+            "@Library('build-lib') _\n",
+            "        stage('Bad') {\n"
+            "            steps {\n"
+            f"                {bad}('abc')\n"
+            "            }\n"
+            "        }\n",
+        )
+        out_dir = Path(f"mig-{bad}")
+        rc = main(["convert", str(jf), "--output", str(out_dir), "--library-map", str(map_path)])
+        assert rc == 2
+        capsys.readouterr()
+        assert "if: false" in (out_dir / "workflow.yml").read_text(encoding="utf-8")
+        assert not (out_dir / "scripts").exists()
+        report = json.loads((out_dir / "migration-report.json").read_text(encoding="utf-8"))
+        interp = [f for f in report["findings"] if f["code"] == "PB-INTERP"]
+        assert len(interp) == 1
+        assert interp[0]["source_path"].endswith(f"{bad}.groovy")
+        assert interp[0]["call_chain"][0].endswith(f"{bad}@7:17")
+
+    # Valid bare parameters, braced property suffix, trailing dot, and escaped dollar work.
+    jf_good = _write_jf(
+        tmp_path / "Jenkinsfile.good",
+        "@Library('build-lib') _\n",
+        "        stage('Good') {\n"
+        "            steps {\n"
+        "                good('abc')\n"
+        "            }\n"
+        "        }\n",
+    )
+    out_good = Path("mig-good")
+    assert main(["convert", str(jf_good), "--output", str(out_good), "--library-map", str(map_path)]) == 0
+    capsys.readouterr()
+    proc = _run_workflow_steps((out_good / "workflow.yml").read_text(encoding="utf-8"), tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "abc\nabc.length\nHello abc.\n$x.length\n"
