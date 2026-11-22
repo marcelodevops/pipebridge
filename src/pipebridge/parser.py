@@ -30,7 +30,12 @@ import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .credentials import valid_credential_id, valid_variable
+from .credentials import (
+    CredentialHeaderMatch,
+    match_credential_header,
+    valid_credential_id,
+    valid_variable,
+)
 from .errors import MalformedPipelineError
 from .findings import Finding, REGISTRY, PB_AGENT, PB_ASSUME_LIBRARY, PB_CRED, PB_ENVVAL, PB_GROOVY_IMPORT, PB_GROOVY_POSTLUDE, PB_GROOVY_PRELUDE, PB_INPUT, PB_INTERP, PB_LIB, PB_LIB_CALL, PB_MATRIX, PB_PARAM, PB_PARALLEL, PB_POST, PB_SCRIPT, PB_SYNTAX, PB_TRIGGER, PB_TOOLS, PB_WHEN
 from .groovystrings import Decoded, decode_string
@@ -1965,7 +1970,54 @@ class _Parser:
             caller=(caller_path, span.line, span.col, name),
         )
 
-        if res.blocked:
+        binding_ids: list[str] = []
+        cred_collision = False
+        for cred in res.credentials:
+            binding_id = self._alloc_binding_id()
+            binding_ids.append(binding_id)
+            status = cred.status
+            reason = cred.reason
+            if (
+                status == STATUS_PENDING
+                and cred.variable is not None
+                and self._variable_collides(stage, cred.variable)
+            ):
+                status = STATUS_UNSUPPORTED
+                reason = (
+                    f"variable '{cred.variable}' collides with an environment "
+                    "variable of the same name"
+                )
+                cred_collision = True
+                self._findings.append(
+                    Finding(
+                        code=PB_CRED,
+                        severity="blocker",
+                        construct="withCredentials binding",
+                        message=f"Stage '{stage.name}' binds credentials; {reason}.",
+                        line=cred.span.line,
+                        col=cred.span.col,
+                        suggestion=self._CRED_SUGGESTION,
+                        source_path=cred.source_path,
+                        call_chain=cred.call_chain,
+                    )
+                )
+            self.inventory.append(
+                CredentialBinding(
+                    binding_id=binding_id,
+                    binding_type=cred.binding_type,
+                    credential_id=cred.credential_id,
+                    variable=cred.variable,
+                    secret_name=None,
+                    status=status,
+                    reason=reason,
+                    stage_name=stage.name,
+                    span=cred.span,
+                    source_path=cred.source_path,
+                    call_chain=cred.call_chain,
+                )
+            )
+
+        if res.blocked or cred_collision:
             self._findings.extend(res.findings)
             chain = (
                 res.findings[-1].call_chain
@@ -2035,12 +2087,14 @@ class _Parser:
             return
 
         for op in res.operations:
+            op_binding_ids = tuple(binding_ids[idx] for idx in op.credential_refs)
             if op.kind == "echo" and not op.args:
                 stage.steps.append(
                     Step(
                         kind="echo",
                         text=op.text or "",
                         span=op.span or span,
+                        credential_binding_ids=op_binding_ids,
                         source_path=str(op.path) if op.path is not None else None,
                     )
                 )
@@ -2053,6 +2107,7 @@ class _Parser:
                         kind="sh",
                         text=op.text or "",
                         span=op.span or span,
+                        credential_binding_ids=op_binding_ids,
                         args=op.args,
                         script_path=rel_script,
                         source_path=str(op.path) if op.path is not None else None,
@@ -2074,113 +2129,13 @@ class _Parser:
             "migrated automatically. The step body was not analyzed."
         )
 
-    def _look_ahead_credential_header(self) -> "_HeaderMatch":
+    def _look_ahead_credential_header(self) -> CredentialHeaderMatch:
         """Classify a withCredentials header without consuming tokens.
 
         The name token is already consumed. An accepted match points at the
         body ``{``; anything else is unsupported and left for opaque skipping.
         """
-        tokens = self._tokens
-
-        def skip(index: int) -> int:
-            # Newlines are insignificant. Semicolons separate statements and
-            # are not header whitespace; a ';' between tokens or before '{'
-            # rejects the header instead of attaching a detached closure.
-            while index < len(tokens) and tokens[index].kind == NEWLINE:
-                index += 1
-            return min(index, len(tokens) - 1)
-
-        def fail(
-            binding_type: str,
-            reason: str,
-            credential_id: str | None = None,
-            variable: str | None = None,
-        ) -> "_HeaderMatch":
-            return _HeaderMatch(False, binding_type, credential_id, variable, None, reason)
-
-        index = skip(self._pos)
-        if tokens[index].kind != LPAREN:
-            return fail("unknown", "withCredentials call is not the accepted literal string form")
-        index = skip(index + 1)
-        if tokens[index].kind != LBRACKET:
-            return fail("unknown", "withCredentials argument is not a single-element list")
-        index = skip(index + 1)
-        if tokens[index].kind != IDENT:
-            return fail("unknown", "credential binding type is not a literal identifier")
-        binding_type = tokens[index].value
-        index = skip(index + 1)
-        if tokens[index].kind != LPAREN:
-            return fail(binding_type, f"credential binding '{binding_type}' is not a named-argument call")
-        index = skip(index + 1)
-
-        args: dict[str, str] = {}
-        if tokens[index].kind == RPAREN:
-            return fail(binding_type, f"credential binding '{binding_type}' has no arguments")
-        while True:
-            index = skip(index)
-            if tokens[index].kind != IDENT:
-                return fail(binding_type, f"credential binding '{binding_type}' has a non-literal argument")
-            arg_name = tokens[index].value
-            index = skip(index + 1)
-            if tokens[index].kind != COLON:
-                return fail(binding_type, f"credential binding '{binding_type}' is not named arguments")
-            index = skip(index + 1)
-            value = tokens[index]
-            if value.kind not in (STRING_SQ, STRING_DQ):
-                return fail(
-                    binding_type,
-                    f"credential binding '{binding_type}' argument is not a "
-                    "single- or double-quoted literal",
-                )
-            if arg_name in args:
-                return fail(binding_type, f"credential binding '{binding_type}' repeats argument '{arg_name}'")
-            decoded = decode_string(value.value, value.kind, value.line, value.col)
-            if decoded.has_interpolation or decoded.value is None:
-                return fail(binding_type, f"credential binding '{binding_type}' argument '{arg_name}' is dynamic")
-            args[arg_name] = decoded.value
-            index = skip(index + 1)
-            if tokens[index].kind == COMMA:
-                nxt = skip(index + 1)
-                if tokens[nxt].kind == RPAREN:
-                    return fail(binding_type, f"credential binding '{binding_type}' has a trailing comma")
-                index = nxt
-                continue
-            if tokens[index].kind == RPAREN:
-                break
-            return fail(binding_type, f"credential binding '{binding_type}' has unexpected argument syntax")
-
-        index = skip(index + 1)
-        if tokens[index].kind == COMMA:
-            return fail(binding_type, "credential binding list has more than one entry")
-        if tokens[index].kind != RBRACKET:
-            return fail(binding_type, "credential binding list is not closed")
-        index = skip(index + 1)
-        if tokens[index].kind != RPAREN:
-            return fail(binding_type, "withCredentials call is not closed")
-        index = skip(index + 1)
-        if tokens[index].kind != LBRACE:
-            return fail(binding_type, "withCredentials body is missing")
-        if binding_type != "string":
-            return fail(binding_type, f"credential binding type '{binding_type}' is not the accepted string form")
-        if set(args) != {"credentialsId", "variable"}:
-            return fail("string", "string binding must have exactly credentialsId and variable")
-        credential_id = args["credentialsId"]
-        variable = args["variable"]
-        if not valid_credential_id(credential_id):
-            return fail(
-                "string",
-                "credentialsId is empty, has surrounding whitespace, or contains a control character",
-                credential_id,
-                variable,
-            )
-        if not valid_variable(variable):
-            return fail(
-                "string",
-                "variable is not a valid environment name or uses a reserved prefix",
-                credential_id,
-                variable,
-            )
-        return _HeaderMatch(True, "string", credential_id, variable, index, "")
+        return match_credential_header(self._tokens, self._pos)
 
     def _append_binding(
         self,

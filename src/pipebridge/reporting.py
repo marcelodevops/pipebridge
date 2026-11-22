@@ -130,20 +130,23 @@ def _credentials_section(analysis) -> dict:
     bindings = []
     grouped: dict[str, dict[str, list[str]]] = {}
     for entry in inventory.entries:
-        bindings.append(
-            {
-                "binding_id": entry.binding_id,
-                "binding_type": entry.binding_type,
-                "credential_id": entry.credential_id,
-                "variable": entry.variable,
-                "secret_name": entry.secret_name,
-                "stage": entry.stage_name,
-                "source_line": entry.span.line,
-                "source_col": entry.span.col,
-                "status": entry.status,
-                "reason": entry.reason,
-            }
-        )
+        row = {
+            "binding_id": entry.binding_id,
+            "binding_type": entry.binding_type,
+            "credential_id": entry.credential_id,
+            "variable": entry.variable,
+            "secret_name": entry.secret_name,
+            "stage": entry.stage_name,
+            "source_line": entry.span.line,
+            "source_col": entry.span.col,
+            "status": entry.status,
+            "reason": entry.reason,
+        }
+        if getattr(entry, "source_path", None) is not None:
+            row["source_path"] = entry.source_path
+        if getattr(entry, "call_chain", ()):
+            row["call_chain"] = list(entry.call_chain)
+        bindings.append(row)
         if entry.status == STATUS_RESOLVED and entry.secret_name:
             bucket = grouped.setdefault(
                 entry.secret_name, {"credential_ids": [], "variables": []}

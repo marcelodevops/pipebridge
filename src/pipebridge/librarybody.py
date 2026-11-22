@@ -10,8 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from .credentials import match_credential_header
 from .errors import PipebridgeError
-from .findings import PB_INTERP, PB_LIB_CALL, Finding
+from .findings import PB_CRED, PB_INTERP, PB_LIB_CALL, Finding
 from .groovystrings import decode_string, decode_template_parts
 from .lexer import (
     COMMA,
@@ -36,7 +37,7 @@ from .libraryresolver import (
     discover_vars,
     load_var,
 )
-from .model import Span
+from .model import STATUS_PENDING, STATUS_UNSUPPORTED, Span
 
 LIBRARY_CALL_DEPTH_CAP = 20
 
@@ -45,6 +46,18 @@ STRING_KINDS = (STRING_SQ, STRING_DQ, STRING_TS, STRING_TD)
 
 class LibraryResolutionError(PipebridgeError):
     """Containment or read failure for a reached file (tool error, exit 1)."""
+
+
+@dataclass(frozen=True)
+class LibraryCredential:
+    binding_type: str
+    credential_id: str | None
+    variable: str | None
+    status: str
+    reason: str | None
+    span: Span
+    source_path: str
+    call_chain: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,12 +74,14 @@ class Operation:
     var_name: str | None = None
     func_name: str | None = None
     step_index: int = 0
+    credential_refs: tuple[int, ...] = ()
 
 
 @dataclass
 class Resolution:
     operations: list[Operation] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
+    credentials: list[LibraryCredential] = field(default_factory=list)
     blocked: bool = False
     pending: bool = False
 
@@ -163,7 +178,7 @@ class Resolver:
             if f.is_blocker:
                 res.blocked = True
 
-    def _expand(self, var, defn, arg_values, stack, frames, res, lib_name: str | None = None):
+    def _expand(self, var, defn, arg_values, stack, frames, res, lib_name: str | None = None, cred_refs: tuple[int, ...] = ()):
         if len(stack) >= LIBRARY_CALL_DEPTH_CAP:
             res.blocked = True
             res.findings.append(_finding(PB_LIB_CALL, f"Library call depth exceeded {LIBRARY_CALL_DEPTH_CAP} at '{defn.name}'.", defn.span.line, defn.span.col, path=var.path, chain=frames))
@@ -175,7 +190,7 @@ class Resolver:
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call cycle: {chain}.", defn.span.line, defn.span.col, path=var.path, chain=frames))
                 return
         params = {p.name: v for p, v in zip(defn.params, arg_values)}
-        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, frames, lib_name=lib_name)
+        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, frames, lib_name=lib_name, cred_refs=cred_refs)
 
     def _arg_value(self, tok, params):
         if tok.kind in STRING_KINDS:
@@ -187,32 +202,201 @@ class Resolver:
             return params[tok.value]
         return None
 
-    def _expand_body(self, var, defn, params, stack, res, chain, lib_name: str | None = None):
-        step_counter = 0
-        for stmt in _split_statements(defn.body):
+    def _expand_body(self, var, defn, params, stack, res, chain, lib_name: str | None = None, cred_refs: tuple[int, ...] = ()):
+        self._expand_statements(
+            defn.body, var, defn, params, stack, res, chain, lib_name, 0, cred_refs
+        )
+
+    def _expand_statements(
+        self,
+        tokens,
+        var,
+        defn,
+        params,
+        stack,
+        res,
+        chain,
+        lib_name: str | None,
+        step_counter: int,
+        cred_refs: tuple[int, ...],
+    ) -> int:
+        for stmt in _split_statements(tokens):
             if not stmt:
                 continue
             first = stmt[0]
             if first.kind == IDENT and first.value in ("sh", "echo"):
                 step_counter = self._do_sh_echo(
-                    first.value, stmt, params, res, var, defn, chain, lib_name, step_counter
+                    first.value, stmt, params, res, var, defn, chain, lib_name, step_counter, cred_refs
                 )
             elif first.kind == IDENT and first.value == "withCredentials":
-                res.pending = True
-                res.operations.append(Operation(kind="with-credentials", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name))
+                step_counter = self._do_with_credentials(
+                    stmt, var, defn, params, stack, res, chain, lib_name, step_counter, cred_refs
+                )
             elif first.kind == IDENT and first.value == "stash":
                 res.pending = True
-                res.operations.append(Operation(kind="stash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name))
+                res.operations.append(Operation(kind="stash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name, credential_refs=cred_refs))
             elif first.kind == IDENT and first.value == "unstash":
                 res.pending = True
-                res.operations.append(Operation(kind="unstash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name))
+                res.operations.append(Operation(kind="unstash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name, credential_refs=cred_refs))
             elif first.kind == IDENT and len(stmt) >= 2 and stmt[1].kind == LPAREN:
-                self._do_invocation(first, stmt, var, defn, params, stack, res, chain, lib_name)
+                self._do_invocation(first, stmt, var, defn, params, stack, res, chain, lib_name, cred_refs)
             else:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Unsupported library statement at line {first.line}: '{first.value}'.", first.line, first.col, path=var.path, chain=chain))
+        return step_counter
 
-    def _do_sh_echo(self, which, stmt, params, res, var, defn, chain, lib_name: str | None, step_counter: int) -> int:
+    def _do_with_credentials(
+        self,
+        stmt,
+        var,
+        defn,
+        params,
+        stack,
+        res,
+        chain,
+        lib_name: str | None,
+        step_counter: int,
+        cred_refs: tuple[int, ...],
+    ) -> int:
+        first = stmt[0]
+        if cred_refs:
+            res.blocked = True
+            res.findings.append(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Nested withCredentials is not supported in '{var.path}'.",
+                    first.line,
+                    first.col,
+                    construct="withCredentials binding",
+                    path=var.path,
+                    chain=chain,
+                )
+            )
+            return step_counter
+
+        header = match_credential_header(stmt, 1)
+        if not header.accepted or header.body_pos is None or header.variable is None:
+            res.credentials.append(
+                LibraryCredential(
+                    binding_type=header.binding_type,
+                    credential_id=None,
+                    variable=None,
+                    status=STATUS_UNSUPPORTED,
+                    reason=header.reason,
+                    span=Span(first.line, first.col),
+                    source_path=str(var.path),
+                    call_chain=chain,
+                )
+            )
+            res.blocked = True
+            res.findings.append(
+                _finding(
+                    PB_CRED,
+                    f"Library '{var.name}' binds credentials; {header.reason}.",
+                    first.line,
+                    first.col,
+                    construct="withCredentials binding",
+                    path=var.path,
+                    chain=chain,
+                )
+            )
+            return step_counter
+
+        # Locate matching '}' for header.body_pos.
+        depth = 0
+        body_end = None
+        for idx in range(header.body_pos, len(stmt)):
+            k = stmt[idx].kind
+            if k == LBRACE:
+                depth += 1
+            elif k == RBRACE:
+                depth -= 1
+                if depth == 0:
+                    body_end = idx
+                    break
+        if body_end is None or body_end + 1 != len(stmt):
+            reason = "withCredentials body is unterminated" if body_end is None else "withCredentials has unsupported trailing tokens"
+            res.credentials.append(
+                LibraryCredential(
+                    binding_type=header.binding_type,
+                    credential_id=header.credential_id,
+                    variable=header.variable,
+                    status=STATUS_UNSUPPORTED,
+                    reason=reason,
+                    span=Span(first.line, first.col),
+                    source_path=str(var.path),
+                    call_chain=chain,
+                )
+            )
+            res.blocked = True
+            res.findings.append(
+                _finding(
+                    PB_CRED,
+                    f"Library '{var.name}' binds credentials; {reason}.",
+                    first.line,
+                    first.col,
+                    construct="withCredentials binding",
+                    path=var.path,
+                    chain=chain,
+                )
+            )
+            return step_counter
+
+        body_tokens = stmt[header.body_pos + 1 : body_end]
+        if not _split_statements(body_tokens):
+            res.credentials.append(
+                LibraryCredential(
+                    binding_type="string",
+                    credential_id=header.credential_id,
+                    variable=header.variable,
+                    status=STATUS_UNSUPPORTED,
+                    reason="body is empty",
+                    span=Span(first.line, first.col),
+                    source_path=str(var.path),
+                    call_chain=chain,
+                )
+            )
+            res.blocked = True
+            res.findings.append(
+                _finding(
+                    PB_LIB_CALL,
+                    f"withCredentials body in '{var.path}' is empty.",
+                    first.line,
+                    first.col,
+                    construct="withCredentials binding",
+                    path=var.path,
+                    chain=chain,
+                )
+            )
+            return step_counter
+
+        cred_idx = len(res.credentials)
+        res.credentials.append(
+            LibraryCredential(
+                binding_type="string",
+                credential_id=header.credential_id,
+                variable=header.variable,
+                status=STATUS_PENDING,
+                reason=None,
+                span=Span(first.line, first.col),
+                source_path=str(var.path),
+                call_chain=chain,
+            )
+        )
+        return self._expand_statements(
+            body_tokens,
+            var,
+            defn,
+            params,
+            stack,
+            res,
+            chain,
+            lib_name,
+            step_counter,
+            (cred_idx,),
+        )
+
+    def _do_sh_echo(self, which, stmt, params, res, var, defn, chain, lib_name: str | None, step_counter: int, cred_refs: tuple[int, ...] = ()) -> int:
         path = var.path
         tok = stmt[0]
         idx = 1
@@ -268,6 +452,7 @@ class Resolver:
                     var_name=var.name,
                     func_name=defn.name,
                     step_index=step_counter,
+                    credential_refs=cred_refs,
                 )
             )
             return step_counter
@@ -309,11 +494,12 @@ class Resolver:
                 var_name=var.name,
                 func_name=defn.name,
                 step_index=step_idx,
+                credential_refs=cred_refs,
             )
         )
         return step_counter
 
-    def _do_invocation(self, name_tok, stmt, var, defn, params, stack, res, chain, lib_name: str | None = None):
+    def _do_invocation(self, name_tok, stmt, var, defn, params, stack, res, chain, lib_name: str | None = None, cred_refs: tuple[int, ...] = ()):
         chain = chain + (_frame(var.path, name_tok.line, name_tok.col, name_tok.value),)
         args = []
         idx = 2
@@ -364,7 +550,7 @@ class Resolver:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); requires {len(helper.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
-            self._expand(var, helper, args, stack, chain, res, lib_name=lib_name)
+            self._expand(var, helper, args, stack, chain, res, lib_name=lib_name, cred_refs=cred_refs)
             return
         if candidates:
             if len(candidates) > 1:
@@ -386,7 +572,7 @@ class Resolver:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); call() requires {len(call.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
-            self._expand(nested, call, args, stack, chain, res, lib_name=disc.library)
+            self._expand(nested, call, args, stack, chain, res, lib_name=disc.library, cred_refs=cred_refs)
             return
         res.blocked = True
         res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has no definition.", name_tok.line, name_tok.col, path=var.path, chain=chain))

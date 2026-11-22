@@ -68,6 +68,8 @@ class CredentialBinding:
     reason: str | None
     stage_name: str
     span: Span
+    source_path: str | None = None
+    call_chain: tuple[str, ...] = ()
 
 
 @dataclass

@@ -12,6 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import PipebridgeError
+from .groovystrings import decode_string
+from .lexer import (
+    COLON,
+    COMMA,
+    IDENT,
+    LBRACE,
+    LBRACKET,
+    LPAREN,
+    NEWLINE,
+    RBRACKET,
+    RPAREN,
+    STRING_DQ,
+    STRING_SQ,
+)
 from .findings import (
     Finding,
     PB_ASSUME_CREDENTIALS,
@@ -41,6 +55,119 @@ _MAP_SUGGESTION = (
 
 class CredentialMapError(PipebridgeError):
     """The mapping file is missing, unreadable, or structurally invalid."""
+
+
+@dataclass(frozen=True)
+class CredentialHeaderMatch:
+    accepted: bool
+    binding_type: str
+    credential_id: str | None
+    variable: str | None
+    body_pos: int | None
+    reason: str
+
+
+def match_credential_header(tokens, start_pos: int) -> CredentialHeaderMatch:
+    """Classify a withCredentials header starting after the ``withCredentials`` token."""
+
+    def skip(index: int) -> int:
+        while index < len(tokens) and tokens[index].kind == NEWLINE:
+            index += 1
+        return min(index, len(tokens) - 1)
+
+    def fail(
+        binding_type: str,
+        reason: str,
+        credential_id: str | None = None,
+        variable: str | None = None,
+    ) -> CredentialHeaderMatch:
+        return CredentialHeaderMatch(False, binding_type, credential_id, variable, None, reason)
+
+    if not tokens:
+        return fail("unknown", "withCredentials call is not the accepted literal string form")
+    index = skip(start_pos)
+    if tokens[index].kind != LPAREN:
+        return fail("unknown", "withCredentials call is not the accepted literal string form")
+    index = skip(index + 1)
+    if tokens[index].kind != LBRACKET:
+        return fail("unknown", "withCredentials argument is not a single-element list")
+    index = skip(index + 1)
+    if tokens[index].kind != IDENT:
+        return fail("unknown", "credential binding type is not a literal identifier")
+    binding_type = tokens[index].value
+    index = skip(index + 1)
+    if tokens[index].kind != LPAREN:
+        return fail(binding_type, f"credential binding '{binding_type}' is not a named-argument call")
+    index = skip(index + 1)
+
+    args: dict[str, str] = {}
+    if tokens[index].kind == RPAREN:
+        return fail(binding_type, f"credential binding '{binding_type}' has no arguments")
+    while True:
+        index = skip(index)
+        if tokens[index].kind != IDENT:
+            return fail(binding_type, f"credential binding '{binding_type}' has a non-literal argument")
+        arg_name = tokens[index].value
+        index = skip(index + 1)
+        if tokens[index].kind != COLON:
+            return fail(binding_type, f"credential binding '{binding_type}' is not named arguments")
+        index = skip(index + 1)
+        value = tokens[index]
+        if value.kind not in (STRING_SQ, STRING_DQ):
+            return fail(
+                binding_type,
+                f"credential binding '{binding_type}' argument is not a "
+                "single- or double-quoted literal",
+            )
+        if arg_name in args:
+            return fail(binding_type, f"credential binding '{binding_type}' repeats argument '{arg_name}'")
+        decoded = decode_string(value.value, value.kind, value.line, value.col)
+        if decoded.has_interpolation or decoded.value is None:
+            return fail(binding_type, f"credential binding '{binding_type}' argument '{arg_name}' is dynamic")
+        args[arg_name] = decoded.value
+        index = skip(index + 1)
+        if tokens[index].kind == COMMA:
+            nxt = skip(index + 1)
+            if tokens[nxt].kind == RPAREN:
+                return fail(binding_type, f"credential binding '{binding_type}' has a trailing comma")
+            index = nxt
+            continue
+        if tokens[index].kind == RPAREN:
+            break
+        return fail(binding_type, f"credential binding '{binding_type}' has unexpected argument syntax")
+
+    index = skip(index + 1)
+    if tokens[index].kind == COMMA:
+        return fail(binding_type, "credential binding list has more than one entry")
+    if tokens[index].kind != RBRACKET:
+        return fail(binding_type, "credential binding list is not closed")
+    index = skip(index + 1)
+    if tokens[index].kind != RPAREN:
+        return fail(binding_type, "withCredentials call is not closed")
+    index = skip(index + 1)
+    if tokens[index].kind != LBRACE:
+        return fail(binding_type, "withCredentials body is missing")
+    if binding_type != "string":
+        return fail(binding_type, f"credential binding type '{binding_type}' is not the accepted string form")
+    if set(args) != {"credentialsId", "variable"}:
+        return fail("string", "string binding must have exactly credentialsId and variable")
+    credential_id = args["credentialsId"]
+    variable = args["variable"]
+    if not valid_credential_id(credential_id):
+        return fail(
+            "string",
+            "credentialsId is empty, has surrounding whitespace, or contains a control character",
+            credential_id,
+            variable,
+        )
+    if not valid_variable(variable):
+        return fail(
+            "string",
+            "variable is not a valid environment name or uses a reserved prefix",
+            credential_id,
+            variable,
+        )
+    return CredentialHeaderMatch(True, "string", credential_id, variable, index, "")
 
 
 @dataclass(frozen=True)
@@ -136,6 +263,8 @@ def resolve_credentials(
 
     if resolved:
         anchor = resolved[0]
+        anchor_src = getattr(anchor, "source_path", None)
+        anchor_chain = getattr(anchor, "call_chain", ())
         if secrets_ready:
             findings.append(
                 Finding(
@@ -153,6 +282,8 @@ def resolve_credentials(
                         "Confirm each secret name matches the checklist exactly "
                         "before enabling the workflow."
                     ),
+                    source_path=anchor_src,
+                    call_chain=anchor_chain,
                 )
             )
         else:
@@ -172,6 +303,8 @@ def resolve_credentials(
                         "Create the secrets listed in the report, then re-run with "
                         "the same --credential-map and --secrets-ready."
                     ),
+                    source_path=anchor_src,
+                    call_chain=anchor_chain,
                 )
             )
 
@@ -220,7 +353,7 @@ def _resolve_one(entry, credential_map, colliding, inventory):
             secret_name=None,
             reason=reason,
         )
-        return updated, _map_finding(entry.span, reason)
+        return updated, _map_finding(entry.span, reason, entry)
 
     mapped = credential_map.entries[cred_id]
     if not valid_secret_name(mapped.secret):
@@ -234,7 +367,7 @@ def _resolve_one(entry, credential_map, colliding, inventory):
             secret_name=None,
             reason=reason,
         )
-        return updated, _map_finding(entry.span, reason)
+        return updated, _map_finding(entry.span, reason, entry)
 
     if cred_id in colliding:
         reason = (
@@ -247,7 +380,7 @@ def _resolve_one(entry, credential_map, colliding, inventory):
             secret_name=None,
             reason=reason,
         )
-        return updated, _map_finding(entry.span, reason)
+        return updated, _map_finding(entry.span, reason, entry)
 
     updated = inventory.replace(
         entry.binding_id,
@@ -275,7 +408,7 @@ def _colliding_ids(credential_map: CredentialMap | None) -> set[str]:
     return colliding
 
 
-def _map_finding(span: Span, message: str) -> Finding:
+def _map_finding(span: Span, message: str, entry=None) -> Finding:
     return Finding(
         code=PB_CRED_MAP,
         severity="blocker",
@@ -284,6 +417,8 @@ def _map_finding(span: Span, message: str) -> Finding:
         line=span.line,
         col=span.col,
         suggestion=_MAP_SUGGESTION,
+        source_path=getattr(entry, "source_path", None) if entry is not None else None,
+        call_chain=getattr(entry, "call_chain", ()) if entry is not None else (),
     )
 
 
