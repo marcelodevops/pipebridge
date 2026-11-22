@@ -4,6 +4,90 @@ All notable changes to pipebridge are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — Alpha (2026-11-22)
+
+**Bounded local shared-library migration (`vars/*.groovy`), script emission,
+library `withCredentials` string bindings, and single-job `stash` / `unstash`.**
+When `--library-map` supplies a strict `schema_version: 1` mapping of library
+names to relative local directories containing `vars/`, eligible prelude
+declarations (`@Library('name') _` and `@Library('name@rev') _`) are resolved
+statically without fetching repositories or executing Groovy. Unmapped or
+ineligible `@Library` forms and the declarative `library` section retain
+`PB-LIB`.
+
+Reached `vars/<name>.groovy` files are parsed statically for `def call` and
+same-file helpers. Supported statements are literal/parameterized `sh` and
+`echo`, helper and cross-var calls with literal string or forwarded in-scope
+parameter arguments, bounded single-entry `string` `withCredentials` bindings,
+and single-job `stash` / `unstash`. Parameter values are never spliced into
+generated `.sh` files: script bodies use braced positional parameters
+(`${1}`, `${2}`, …, `${10}`) and workflow steps pass neutralized, single-quoted
+`argv` tokens to `bash --noprofile --norc -eo pipefail`. `sh(param)` passes
+parameter-supplied shell text via `argv` to
+`bash --noprofile --norc -eo pipefail -c "${1}"`.
+
+Single-job `stash` and `unstash` emit `scripts/pipebridge_stash.py` and
+`scripts/pipebridge_unstash.py` storing files under
+`$RUNNER_TEMP/pipebridge-stash/<name>` with a final `always()`
+`continue-on-error: true` cleanup step. Both helpers reject symlinks and
+containment escapes; `pipebridge_unstash.py` prevalidates all source entries
+(regular files only) and destination parents/leaves before copying.
+
+Live `workflow_dispatch` validation on GitHub Actions is recorded in
+[`docs/shared-library-live-validation.md`](docs/shared-library-live-validation.md).
+Not yet published: no `v0.5.0` tag, GitHub release, or release asset exists.
+Published v0.1.0, v0.2.0, v0.2.1, and v0.3.0 assets are unchanged.
+
+### Added
+
+- `--library-map` on `analyze` and `convert` (`schema_version: 1` JSON mapping
+  library names to relative local directories with `vars/`).
+- Static resolution of eligible `@Library('name') _` and
+  `@Library('name@rev') _` declarations and `vars/<name>.groovy` `def call` /
+  helper definitions, with recursion and call-depth (`20`) checks.
+- Deterministic `<output>/scripts/<library>/<var>/<function>-<n>.sh` emission
+  committed transactionally with `workflow.yml` and reports via `_write_all`.
+- Bounded `withCredentials([string(credentialsId: '…', variable: 'NAME')])`
+  support inside library bodies, reusing `CredentialInventory`,
+  `--credential-map`, and `--secrets-ready`.
+- Bounded single-job `stash` and `unstash` in Jenkinsfiles and library bodies,
+  emitting `scripts/pipebridge_stash.py`, `scripts/pipebridge_unstash.py`, and
+  the `Remove pipebridge stash` `always()` cleanup step.
+- Finding codes `PB-LIB-CALL`, `PB-LIB-MAP-UNUSED`, and `PB-ASSUME-LIBRARY`,
+  plus additive `libraries` report inventory and `source_path` / `call_chain`
+  provenance.
+
+### Changed
+
+- Generated library script invocations run under
+  `bash --noprofile --norc -eo pipefail` so `errexit` and `pipefail` hold
+  inside child scripts.
+- Finding deduplication includes `source_path` and `call_chain` so identical
+  coordinates across library files or distinct call sites are preserved.
+
+### Fixed
+
+- Unbraced dotted property interpolations (`$x.length`, `$a.b.c`) are rejected
+  with `PB-INTERP` instead of being split into `${1}.length`.
+- `pipebridge_stash.py` detects symlinked directories whose descendants could
+  match `includes` (accounting for `excludes`) without following symlinks.
+- `pipebridge_unstash.py` prevalidates all source entries as regular files and
+  checks destination parents/leaves before writing any destination file.
+
+### Known limitations
+
+- Local mapped libraries only (`vars/*.groovy`); no repository fetching, no
+  Groovy execution, and no `src/` or `resources/` support.
+- Single-job `stash` / `unstash` only (`$RUNNER_TEMP/pipebridge-stash/<name>`);
+  requires `bash` and `python3` on the runner. Runtime restore `OSError`s fail
+  non-zero and may leave partial destination changes.
+- Output replacement on disk is staged with `OSError` rollback, not
+  crash-atomic across process kills.
+- In the live expected-failure validation run, failure occurred at
+  `Fail (step 2)` before `stash`, so that run verified `always()` cleanup
+  execution after early failure rather than removal of a populated stash after
+  failure. No comparison against live Jenkins execution was performed.
+
 ## [0.4.0] — Alpha (2026-11-20)
 
 **Bounded literal `string` credential bindings.** One
