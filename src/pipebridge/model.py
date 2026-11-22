@@ -46,6 +46,9 @@ class Step:
     dollar_spans: tuple[tuple[int, int, int], ...] = ()
     # References into CredentialInventory. Not copies of binding data.
     credential_binding_ids: tuple[str, ...] = ()
+    args: tuple[str, ...] = ()
+    script_path: str | None = None
+    source_path: str | None = None
 
 
 @dataclass(frozen=True)

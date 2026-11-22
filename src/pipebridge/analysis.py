@@ -82,9 +82,7 @@ class AnalysisResult:
 
     @property
     def library_emission_deferred(self) -> bool:
-        return bool(
-            self.library_inventory.calls or self.library_inventory.operations
-        )
+        return any(op.pending for op in self.library_inventory.operations)
 
     @property
     def conversion_blocked(self) -> bool:

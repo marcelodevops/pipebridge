@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .errors import PipebridgeError
 from .findings import PB_INTERP, PB_LIB_CALL, Finding
-from .groovystrings import decode_string
+from .groovystrings import decode_string, decode_template
 from .lexer import (
     COMMA,
     IDENT,
@@ -57,6 +57,10 @@ class Operation:
     path: Path | None = None
     pending: bool = False
     call_chain: tuple[str, ...] = ()
+    library: str | None = None
+    var_name: str | None = None
+    func_name: str | None = None
+    step_index: int = 0
 
 
 @dataclass
@@ -147,7 +151,7 @@ class Resolver:
             res.operations = []
             res.findings.append(_finding(PB_LIB_CALL, f"Library call '{var_name}' passed {len(args)} argument(s); call() requires {len(call.params)}.", call.span.line, call.span.col, path=var.path, chain=(root_frame, _label(var.path, call))))
             return res
-        self._expand(var, call, args, [], (root_frame,), res)
+        self._expand(var, call, args, [], (root_frame,), res, lib_name=disc.library)
         if res.blocked:
             res.operations = []
         return res
@@ -159,7 +163,7 @@ class Resolver:
             if f.is_blocker:
                 res.blocked = True
 
-    def _expand(self, var, defn, arg_values, stack, frames, res):
+    def _expand(self, var, defn, arg_values, stack, frames, res, lib_name: str | None = None):
         if len(stack) >= LIBRARY_CALL_DEPTH_CAP:
             res.blocked = True
             res.findings.append(_finding(PB_LIB_CALL, f"Library call depth exceeded {LIBRARY_CALL_DEPTH_CAP} at '{defn.name}'.", defn.span.line, defn.span.col, path=var.path, chain=frames))
@@ -171,7 +175,7 @@ class Resolver:
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call cycle: {chain}.", defn.span.line, defn.span.col, path=var.path, chain=frames))
                 return
         params = {p.name: v for p, v in zip(defn.params, arg_values)}
-        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, frames)
+        self._expand_body(var, defn, params, stack + [(var.path, defn)], res, frames, lib_name=lib_name)
 
     def _arg_value(self, tok, params):
         if tok.kind in STRING_KINDS:
@@ -183,68 +187,120 @@ class Resolver:
             return params[tok.value]
         return None
 
-    def _expand_body(self, var, defn, params, stack, res, chain):
+    def _expand_body(self, var, defn, params, stack, res, chain, lib_name: str | None = None):
+        step_counter = 0
         for stmt in _split_statements(defn.body):
             if not stmt:
                 continue
             first = stmt[0]
             if first.kind == IDENT and first.value in ("sh", "echo"):
-                self._do_sh_echo(first.value, stmt, params, res, var.path, chain)
+                step_counter = self._do_sh_echo(
+                    first.value, stmt, params, res, var, defn, chain, lib_name, step_counter
+                )
             elif first.kind == IDENT and first.value == "withCredentials":
                 res.pending = True
-                res.operations.append(Operation(kind="with-credentials", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain))
+                res.operations.append(Operation(kind="with-credentials", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name))
             elif first.kind == IDENT and first.value == "stash":
                 res.pending = True
-                res.operations.append(Operation(kind="stash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain))
+                res.operations.append(Operation(kind="stash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name))
             elif first.kind == IDENT and first.value == "unstash":
                 res.pending = True
-                res.operations.append(Operation(kind="unstash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain))
+                res.operations.append(Operation(kind="unstash", span=Span(first.line, first.col), path=var.path, pending=True, call_chain=chain, library=lib_name, var_name=var.name, func_name=defn.name))
             elif first.kind == IDENT and len(stmt) >= 2 and stmt[1].kind == LPAREN:
-                self._do_invocation(first, stmt, var, defn, params, stack, res, chain)
+                self._do_invocation(first, stmt, var, defn, params, stack, res, chain, lib_name)
             else:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Unsupported library statement at line {first.line}: '{first.value}'.", first.line, first.col, path=var.path, chain=chain))
 
-    def _do_sh_echo(self, which, stmt, params, res, path, chain):
+    def _do_sh_echo(self, which, stmt, params, res, var, defn, chain, lib_name: str | None, step_counter: int) -> int:
+        path = var.path
         tok = stmt[0]
         idx = 1
         paren = False
         if idx < len(stmt) and stmt[idx].kind == LPAREN:
             paren = True
             idx += 1
-        if idx >= len(stmt) or stmt[idx].kind not in STRING_KINDS:
+        if idx >= len(stmt) or (
+            stmt[idx].kind not in STRING_KINDS
+            and not (stmt[idx].kind == IDENT and stmt[idx].value in params)
+        ):
             res.blocked = True
             res.findings.append(_finding(PB_LIB_CALL, f"{which} requires a string argument in the supported subset.", tok.line, tok.col, path=path, chain=chain))
-            return
+            return step_counter
+        arg_tok = stmt[idx]
         if paren:
             idx += 1
             if idx >= len(stmt) or stmt[idx].kind != RPAREN:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"{which} requires a closing ')' in the supported subset.", tok.line, tok.col, path=path, chain=chain))
-                return
+                return step_counter
             idx += 1
         else:
             idx += 1
         if idx != len(stmt):
             res.blocked = True
             res.findings.append(_finding(PB_LIB_CALL, f"{which} has unsupported trailing tokens in the supported subset.", tok.line, tok.col, path=path, chain=chain))
-            return
-        dec = decode_string(stmt[1 if not paren else 2].value, stmt[1 if not paren else 2].kind, stmt[1 if not paren else 2].line, stmt[1 if not paren else 2].col)
-        bindings: dict[str, str] = {}
-        if dec.has_interpolation:
-            for interp in dec.interpolations:
-                raw = interp.text.strip()
-                if raw.startswith("${") and raw.endswith("}"):
-                    raw = raw[2:-1].strip()
-                name = raw.lstrip("$").strip()
-                if name not in params:
-                    res.blocked = True
-                    res.findings.append(_finding(PB_INTERP, f"Unsupported interpolation in library {which}: '{interp.text}'.", interp.line, interp.col, path=path, chain=chain))
-                    return
-                bindings[name] = params[name]
-        res.operations.append(Operation(kind=which, text=dec.value if dec.value is not None else stmt[1 if not paren else 2].value, bindings=bindings, span=Span(tok.line, tok.col), path=path, call_chain=chain))
+            return step_counter
 
-    def _do_invocation(self, name_tok, stmt, var, defn, params, stack, res, chain):
+        if arg_tok.kind == IDENT:
+            param_name = arg_tok.value
+            arg_values = (params[param_name],)
+            bindings = {param_name: params[param_name]}
+            step_counter += 1
+            script_text = 'printf \'%s\\n\' "$1"' if which == "echo" else '"$1"'
+            res.operations.append(
+                Operation(
+                    kind=which,
+                    text=script_text,
+                    args=arg_values,
+                    bindings=bindings,
+                    span=Span(tok.line, tok.col),
+                    path=path,
+                    call_chain=chain,
+                    library=lib_name,
+                    var_name=var.name,
+                    func_name=defn.name,
+                    step_index=step_counter,
+                )
+            )
+            return step_counter
+
+        template, param_order, invalid = decode_template(
+            arg_tok.value, arg_tok.kind, arg_tok.line, arg_tok.col, params
+        )
+        if template is None:
+            first_bad = invalid[0]
+            res.blocked = True
+            res.findings.append(_finding(PB_INTERP, f"Unsupported interpolation in library {which}: '{first_bad.text}'.", first_bad.line, first_bad.col, path=path, chain=chain))
+            return step_counter
+
+        arg_values = tuple(params[name] for name in param_order)
+        bindings = {name: params[name] for name in param_order}
+        if which == "sh" or param_order:
+            step_counter += 1
+            step_idx = step_counter
+            if which == "echo":
+                template = _echo_template_script(template)
+        else:
+            step_idx = 0
+        res.operations.append(
+            Operation(
+                kind=which,
+                text=template,
+                args=arg_values,
+                bindings=bindings,
+                span=Span(tok.line, tok.col),
+                path=path,
+                call_chain=chain,
+                library=lib_name,
+                var_name=var.name,
+                func_name=defn.name,
+                step_index=step_idx,
+            )
+        )
+        return step_counter
+
+    def _do_invocation(self, name_tok, stmt, var, defn, params, stack, res, chain, lib_name: str | None = None):
         chain = chain + (_frame(var.path, name_tok.line, name_tok.col, name_tok.value),)
         args = []
         idx = 2
@@ -295,7 +351,7 @@ class Resolver:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); requires {len(helper.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
-            self._expand(var, helper, args, stack, chain, res)
+            self._expand(var, helper, args, stack, chain, res, lib_name=lib_name)
             return
         if candidates:
             if len(candidates) > 1:
@@ -317,10 +373,41 @@ class Resolver:
                 res.blocked = True
                 res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' passed {len(args)} argument(s); call() requires {len(call.params)}.", name_tok.line, name_tok.col, path=var.path, chain=chain))
                 return
-            self._expand(nested, call, args, stack, chain, res)
+            self._expand(nested, call, args, stack, chain, res, lib_name=disc.library)
             return
         res.blocked = True
         res.findings.append(_finding(PB_LIB_CALL, f"Library call '{name_tok.value}' has no definition.", name_tok.line, name_tok.col, path=var.path, chain=chain))
+
+
+def _echo_template_script(template: str) -> str:
+    """Wrap a ``$N``-substituted echo template in ``printf '%s\\n' "..."``."""
+    out: list[str] = ['printf \'%s\\n\' "']
+    i = 0
+    n = len(template)
+    while i < n:
+        ch = template[i]
+        if ch == "$":
+            if i + 1 < n and template[i + 1].isdigit():
+                j = i + 1
+                while j < n and template[j].isdigit():
+                    j += 1
+                out.append(template[i:j])
+                i = j
+                continue
+            if i + 2 < n and template[i + 1] == "{" and template[i + 2].isdigit():
+                end = template.find("}", i + 2)
+                if end != -1 and template[i + 2 : end].isdigit():
+                    out.append(template[i : end + 1])
+                    i = end + 1
+                    continue
+            out.append("\\$")
+        elif ch in ('\\', '"', '`'):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+        i += 1
+    out.append('"')
+    return "".join(out)
 
 
 def _split_statements(tokens):

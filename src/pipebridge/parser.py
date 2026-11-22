@@ -2032,6 +2032,32 @@ class _Parser:
                 )
             )
             self._mark_stage_blocked(stage)
+            return
+
+        for op in res.operations:
+            if op.kind == "echo" and not op.args:
+                stage.steps.append(
+                    Step(
+                        kind="echo",
+                        text=op.text or "",
+                        span=op.span or span,
+                        source_path=str(op.path) if op.path is not None else None,
+                    )
+                )
+            else:
+                rel_script = (
+                    f"scripts/{op.library}/{op.var_name}/{op.func_name}-{op.step_index}.sh"
+                )
+                stage.steps.append(
+                    Step(
+                        kind="sh",
+                        text=op.text or "",
+                        span=op.span or span,
+                        args=op.args,
+                        script_path=rel_script,
+                        source_path=str(op.path) if op.path is not None else None,
+                    )
+                )
 
     _CRED_SUGGESTION = (
         "Create GitHub Actions secrets and reference them explicitly "

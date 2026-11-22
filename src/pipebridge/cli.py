@@ -193,13 +193,18 @@ def _cmd_convert(args) -> int:
         library_map=library_map,
         source_path=str(path),
     )
-    workflow_text = generate_workflow(analysis, source_name=path.name)
-
     output_dir = Path(args.output)
     if output_dir.exists() and not output_dir.is_dir():
         raise PipebridgeError(f"output path exists and is not a directory: {output_dir}")
 
-    targets = [output_dir / name for name in _OUTPUT_FILES]
+    script_items = _collect_library_scripts(analysis, output_dir)
+    workflow_text = generate_workflow(
+        analysis, source_name=path.name, output_dir=output_dir
+    )
+
+    targets = [output_dir / name for name in _OUTPUT_FILES] + [
+        target for target, _content in script_items
+    ]
     existing = [t for t in targets if t.exists()]
     if existing and not args.force:
         listing = ", ".join(str(t) for t in existing)
@@ -246,6 +251,7 @@ def _cmd_convert(args) -> int:
             (targets[0], workflow_text),
             (targets[1], markdown_text),
             (targets[2], json_text),
+            *script_items,
         ],
         protected=path,
     )
@@ -269,6 +275,52 @@ def _cmd_convert(args) -> int:
             "shared-library script emission is deferred."
         )
     return int(report["exit_code"])
+
+
+def _collect_library_scripts(analysis, output_dir: Path) -> list[tuple[Path, str]]:
+    """Collect deduplicated (target_path, content) pairs for surviving library steps."""
+    pipeline = analysis.pipeline
+    if pipeline is None or pipeline.blocked:
+        return []
+    script_items: list[tuple[Path, str]] = []
+    seen: dict[Path, str] = {}
+    resolved_out: Path | None = None
+    for stage in pipeline.stages:
+        if stage.blocked:
+            continue
+        for step in stage.steps:
+            if step.script_path is None:
+                continue
+            if output_dir.is_absolute() or ".." in output_dir.parts:
+                raise PipebridgeError(
+                    "--output must be a relative path under the working directory "
+                    "when library scripts are emitted."
+                )
+            rel = Path(step.script_path)
+            if rel.is_absolute() or ".." in rel.parts:
+                raise PipebridgeError(
+                    f"library script path escapes output directory: {step.script_path}"
+                )
+            if resolved_out is None:
+                resolved_out = output_dir.resolve()
+            resolved_target = (resolved_out / rel).resolve()
+            try:
+                resolved_target.relative_to(resolved_out)
+            except ValueError as exc:
+                raise PipebridgeError(
+                    f"library script path escapes output directory: {step.script_path}"
+                ) from exc
+            target = output_dir / rel
+            body = (step.text.rstrip("\n") + "\n") if step.text else "\n"
+            if target in seen:
+                if seen[target] != body:
+                    raise PipebridgeError(
+                        f"conflicting script content for {target}"
+                    )
+            else:
+                seen[target] = body
+                script_items.append((target, body))
+    return script_items
 
 
 def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> None:
@@ -321,6 +373,7 @@ def _write_all(items: list[tuple[Path, str]], protected: Path | None = None) -> 
         # is registered BEFORE writing so a partial write that raises is
         # still removed by cleanup.
         for target, content in items:
+            target.parent.mkdir(parents=True, exist_ok=True)
             temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
             staged.append((temp, target))
             temp.write_text(content, encoding="utf-8")

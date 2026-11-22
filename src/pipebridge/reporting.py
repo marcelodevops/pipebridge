@@ -31,9 +31,18 @@ def build_report(analysis, source_path: str, validation: dict | None) -> dict:
             }
             if not stage.blocked:
                 for step in stage.steps:
-                    entry["steps"].append(
-                        {"kind": step.kind, "source_line": step.span.line, "detail": step.text}
-                    )
+                    step_entry: dict = {
+                        "kind": step.kind,
+                        "source_line": step.span.line,
+                        "detail": step.text,
+                    }
+                    if getattr(step, "script_path", None) is not None:
+                        step_entry["script_path"] = step.script_path
+                    if getattr(step, "source_path", None) is not None:
+                        step_entry["source_path"] = step.source_path
+                    if getattr(step, "args", ()):
+                        step_entry["args"] = list(step.args)
+                    entry["steps"].append(step_entry)
                     translated_steps += 1
             translated_stages.append(entry)
 

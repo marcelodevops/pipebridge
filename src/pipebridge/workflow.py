@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from . import __version__
 from .analysis import AnalysisResult, models_implicit_checkout
@@ -96,7 +97,11 @@ def _single_quote_shell(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
-def generate_workflow(analysis: AnalysisResult, source_name: str = "Jenkinsfile") -> str:
+def generate_workflow(
+    analysis: AnalysisResult,
+    source_name: str = "Jenkinsfile",
+    output_dir: Path | None = None,
+) -> str:
     pipeline = analysis.pipeline
     if pipeline is None:
         # No declarative pipeline: still emit a disabled, documented skeleton.
@@ -162,7 +167,9 @@ def generate_workflow(analysis: AnalysisResult, source_name: str = "Jenkinsfile"
         for var in pipeline.env:
             lines.append(f"      {var.name}: {_yaml_scalar(escape_github_expressions(var.value))}")
 
-    steps = _generate_steps(pipeline, blockers, analysis.credential_inventory)
+    steps = _generate_steps(
+        pipeline, blockers, analysis.credential_inventory, output_dir=output_dir
+    )
     if not blockers and library_deferred:
         steps = [
             "      # Shared-library script emission is not yet implemented.",
@@ -249,7 +256,12 @@ def _credential_env_lines(step, inventory: CredentialInventory, stage: Stage) ->
     return lines
 
 
-def _generate_steps(pipeline: Pipeline, blockers, inventory: CredentialInventory | None = None) -> list[str]:
+def _generate_steps(
+    pipeline: Pipeline,
+    blockers,
+    inventory: CredentialInventory | None = None,
+    output_dir: Path | None = None,
+) -> list[str]:
     steps: list[str] = []
     if models_implicit_checkout(pipeline):
         # Model Jenkins' default SCM checkout: it happens before the first
@@ -286,7 +298,17 @@ def _generate_steps(pipeline: Pipeline, blockers, inventory: CredentialInventory
                     f" # {CHECKOUT_ACTION_VERSION} (pinned to full commit SHA)"
                 )
                 continue
-            if step.kind == "echo":
+            if step.script_path is not None:
+                script_ref = (
+                    (output_dir / step.script_path).as_posix()
+                    if output_dir is not None
+                    else step.script_path
+                )
+                parts = ["bash", _expr_safe_shell_quote(script_ref)]
+                for arg in step.args:
+                    parts.append(_expr_safe_shell_quote(arg))
+                command = " ".join(parts)
+            elif step.kind == "echo":
                 command = f"printf '%s\\n' {_expr_safe_shell_quote(step.text)}"
             else:
                 command = escape_github_expressions(step.text)
