@@ -1,16 +1,13 @@
 # Design — Jenkinsfile postlude helper translation via shared-library lowering
 
-> **Status: design only, not implemented.** This document specifies the next
-> bounded milestone on top of `origin/main`
-> (`963e028d9a6b670545e0aea9b9564d215c809189`). It does not change translator
-> behavior, the version (`0.5.0`), finding codes, generated workflows, or
-> published releases. Current pipebridge still classifies every top-level
-> postlude statement — including `def helper(...) { ... }` — as
-> `PB-GROOVY-POSTLUDE` and reports calls to postlude helpers as `PB-SYNTAX`
-> (or `PB-LIB-CALL` when a shared library is loaded). The fixtures under
-> [`examples/jenkinsfile-helpers/`](../examples/jenkinsfile-helpers/) are
-> source inputs for the planned implementation PR; they are not yet converted
-> or wired into live workflows.
+> **Status: implemented.** This document specifies the bounded Jenkinsfile
+> postlude-helper translation milestone built on top of `origin/main`
+> (`97ce6f4be4378143992cf81897e691855ce5c91e`) and implemented in
+> `src/pipebridge/libraryresolver.py`, `src/pipebridge/librarybody.py`,
+> `src/pipebridge/parser.py`, `src/pipebridge/analysis.py`,
+> `src/pipebridge/model.py`, and `src/pipebridge/workflow.py`. The fixtures
+> under [`examples/jenkinsfile-helpers/`](../examples/jenkinsfile-helpers/) are
+> exercised by `tests/test_postlude_helpers.py`.
 
 ## 1. Problem and current behavior
 

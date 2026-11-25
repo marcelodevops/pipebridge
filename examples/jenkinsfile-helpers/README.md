@@ -1,10 +1,39 @@
-# Jenkinsfile postlude helper fixtures (design phase)
+# Jenkinsfile postlude helper fixtures
 
-> **Status: design fixtures only, not yet converted.** These fixtures accompany
+> **Status: implemented.** These fixtures accompany
 > [`docs/jenkinsfile-helper-translation-design.md`](../../docs/jenkinsfile-helper-translation-design.md)
-> and specify the target inputs for the upcoming postlude-helper translation
-> milestone. Current `pipebridge` (`0.5.0`) still reports postlude function
-> definitions as `PB-GROOVY-POSTLUDE`.
+> and exercise bounded translation of top-level `def <helper>(...) { ... }`
+> functions defined after the `pipeline { ... }` block.
+
+## Commands
+
+Analyze or convert the success fixture from the repository root:
+
+```sh
+pipebridge analyze examples/jenkinsfile-helpers/success/Jenkinsfile --format json
+
+pipebridge convert examples/jenkinsfile-helpers/success/Jenkinsfile \
+  --output examples/jenkinsfile-helpers/success/migration
+```
+
+That conversion exits `0`, generates `workflow.yml` plus reports, and writes
+`scripts/_jenkinsfile/writeReleaseMarker-1.sh` and
+`scripts/_jenkinsfile/publishChannel-1.sh` (each reused across both
+`publishChannel(...)` calls). Commit `<output>/scripts/` alongside
+`workflow.yml` when deploying to a repository.
+
+Analyze any negative fixture (each exits `2` with explicit blockers):
+
+```sh
+pipebridge analyze examples/jenkinsfile-helpers/negative/unsupported-body.Jenkinsfile
+pipebridge analyze examples/jenkinsfile-helpers/negative/captured-variable.Jenkinsfile
+pipebridge analyze examples/jenkinsfile-helpers/negative/recursion.Jenkinsfile
+pipebridge analyze examples/jenkinsfile-helpers/negative/collision-builtin.Jenkinsfile
+pipebridge analyze examples/jenkinsfile-helpers/negative/collision-library-var.Jenkinsfile \
+  --library-map examples/shared-library/success/library-map.json
+pipebridge analyze examples/jenkinsfile-helpers/negative/collision-duplicate-helper.Jenkinsfile
+pipebridge analyze examples/jenkinsfile-helpers/negative/mixed-executable-postlude.Jenkinsfile
+```
 
 ## Layout
 
