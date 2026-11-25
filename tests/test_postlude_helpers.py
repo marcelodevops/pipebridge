@@ -15,6 +15,7 @@ from pipebridge import findings as F
 from pipebridge.analysis import analyze_source
 from pipebridge.cli import main
 from pipebridge.librarymap import load_library_map
+from pipebridge.parser import parse
 from pipebridge.workflow import generate_workflow
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -631,4 +632,207 @@ def test_stage_blocker_attribution_via_root_call_chain_and_compatibility(tmp_pat
     py_build = REPO_ROOT / "examples" / "python-build"
     res_py = analyze_source((py_build / "Jenkinsfile").read_text(encoding="utf-8"), source_path=str(py_build / "Jenkinsfile"))
     assert generate_workflow(res_py, source_name="Jenkinsfile") == (py_build / "migration" / "workflow.yml").read_text(encoding="utf-8")
+
+
+def test_postlude_helper_statement_boundaries_parser():
+    # 1. EOF without newline
+    src_eof = (
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('A') {\n"
+        "            steps {\n"
+        "                helper()\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def helper() { echo 'eof_ok' }"
+    )
+    res_eof = parse(src_eof)
+    assert not res_eof.findings
+    assert len(res_eof.pipeline.stages[0].steps) == 1
+    assert res_eof.pipeline.stages[0].steps[0].text == "eof_ok"
+
+    # 2. Newline and comments before the opening brace
+    src_newline_comment = (
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('A') {\n"
+        "            steps {\n"
+        "                helper()\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def helper() // line comment\n"
+        "/* block comment */\n"
+        "\n"
+        "{\n"
+        "    echo 'comment_ok'\n"
+        "}\n"
+    )
+    res_nc = parse(src_newline_comment)
+    assert not res_nc.findings
+    assert len(res_nc.pipeline.stages[0].steps) == 1
+    assert res_nc.pipeline.stages[0].steps[0].text == "comment_ok"
+
+    # 3. Multiple helpers with different boundary variations
+    src_multi = (
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('A') {\n"
+        "            steps {\n"
+        "                h1()\n"
+        "                h2()\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def h1()\n"
+        "{\n"
+        "    echo 'first'\n"
+        "}\n"
+        "def h2() { echo 'second' }"
+    )
+    res_multi = parse(src_multi)
+    assert not res_multi.findings
+    assert [s.text for s in res_multi.pipeline.stages[0].steps] == ["first", "second"]
+
+    # 4. Genuinely unbalanced bodies at EOF
+    unbalanced_body = (
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('A') {\n"
+        "            steps {\n"
+        "                echo 'ok'\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def broken() {\n"
+        "    echo 'unterminated'\n"
+    )
+    res_ub = parse(unbalanced_body)
+    assert any(
+        f.code == "PB-GROOVY-POSTLUDE" and "not closed" in f.message
+        for f in res_ub.findings
+    )
+    assert res_ub.pipeline.blocked is True
+
+    unbalanced_params = (
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('A') {\n"
+        "            steps {\n"
+        "                echo 'ok'\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def broken(String a"
+    )
+    res_up = parse(unbalanced_params)
+    assert any(
+        f.code == "PB-GROOVY-POSTLUDE" and "not closed" in f.message
+        for f in res_up.findings
+    )
+    assert res_up.pipeline.blocked is True
+
+    missing_body_at_eof = (
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('A') {\n"
+        "            steps {\n"
+        "                echo 'ok'\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def broken()"
+    )
+    res_mb = parse(missing_body_at_eof)
+    assert any(
+        f.code == "PB-GROOVY-POSTLUDE" and "not closed" in f.message
+        for f in res_mb.findings
+    )
+    assert res_mb.pipeline.blocked is True
+
+
+def test_postlude_helper_statement_boundaries_cli_and_execution(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    # Valid Jenkinsfile with multiple helpers, newline before brace, comments, and ending at EOF
+    valid_jf = tmp_path / "Jenkinsfile"
+    valid_jf.write_text(
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('Test') {\n"
+        "            steps {\n"
+        "                greet('World')\n"
+        "                farewell('Everyone')\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def greet(String target) // pre-brace comment\n"
+        "{\n"
+        "    sh \"echo Hello ${target}\"\n"
+        "}\n"
+        "def farewell(String target) { sh \"echo Goodbye ${target}\" }",
+        encoding="utf-8",
+    )
+
+    out_dir = Path("migration")
+    rc = main(["convert", str(valid_jf), "--output", str(out_dir)])
+    assert rc == 0
+    capsys.readouterr()
+
+    wf_file = out_dir / "workflow.yml"
+    assert wf_file.is_file()
+    wf_text = wf_file.read_text(encoding="utf-8")
+    assert "if: false" not in wf_text
+
+    # Execute generated workflow to verify exact stdout and success
+    proc = _run_workflow_steps(wf_text, tmp_path)
+    assert proc.returncode == 0
+    assert "Hello World" in proc.stdout
+    assert "Goodbye Everyone" in proc.stdout
+
+    # Genuinely unbalanced body CLI regression: must report PB-GROOVY-POSTLUDE and block
+    unbalanced_jf = tmp_path / "Jenkinsfile.unbalanced"
+    unbalanced_jf.write_text(
+        "pipeline {\n"
+        "    agent any\n"
+        "    stages {\n"
+        "        stage('Test') {\n"
+        "            steps {\n"
+        "                echo 'test'\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "def broken() {\n"
+        "    sh 'echo broken'\n",
+        encoding="utf-8",
+    )
+    out_unbalanced = Path("migration_unbalanced")
+    rc_unbalanced = main(["convert", str(unbalanced_jf), "--output", str(out_unbalanced)])
+    assert rc_unbalanced != 0
+    capsys.readouterr()
+
+    rep_json = json.loads((out_unbalanced / "migration-report.json").read_text(encoding="utf-8"))
+    findings = rep_json["findings"]
+    assert any(
+        f["code"] == "PB-GROOVY-POSTLUDE" and "not closed" in f["message"]
+        for f in findings
+    )
+    wf_unbalanced = (out_unbalanced / "workflow.yml").read_text(encoding="utf-8")
+    assert "if: false" in wf_unbalanced
+
 
