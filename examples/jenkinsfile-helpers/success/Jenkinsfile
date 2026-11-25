@@ -1,0 +1,25 @@
+pipeline {
+    agent any
+    stages {
+        stage('Package') {
+            steps {
+                publishChannel('alpha', 'build-1')
+                publishChannel('beta', 'build-2')
+            }
+        }
+        stage('Verify') {
+            steps {
+                sh 'test "$(cat dist/alpha.txt)" = "alpha:build-1" && test "$(cat dist/beta.txt)" = "beta:build-2"'
+            }
+        }
+    }
+}
+
+def publishChannel(String channel, String tag) {
+    writeReleaseMarker(channel, tag)
+    echo "published ${channel}:${tag}"
+}
+
+def writeReleaseMarker(String channel, String tag) {
+    sh "mkdir -p dist && printf '%s:%s' \"${channel}\" \"${tag}\" > \"dist/${channel}.txt\""
+}
