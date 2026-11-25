@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .errors import LexError, PipebridgeError
 from .findings import (
+    PB_GROOVY_POSTLUDE,
     PB_LIB_CALL,
     PB_LIB_MAP_UNUSED,
     PB_SYNTAX,
@@ -85,7 +86,15 @@ class DiscoveredVar:
     path: Path
 
 
-def _finding(code, message, line, col, severity="blocker", construct="shared library"):
+def _finding(
+    code,
+    message,
+    line,
+    col,
+    severity="blocker",
+    construct="shared library",
+    suggestion="Inline the library steps or provide a supported local library.",
+):
     return Finding(
         code=code,
         severity=severity,
@@ -93,7 +102,7 @@ def _finding(code, message, line, col, severity="blocker", construct="shared lib
         message=message,
         line=line,
         col=col,
-        suggestion="Inline the library steps or provide a supported local library.",
+        suggestion=suggestion,
     )
 
 
@@ -179,41 +188,43 @@ def _skip_newlines(tokens, i):
 
 
 def _parse_params(tokens, i):
-    """Strictly parse a parameter list. Returns (params, index_at_RPAREN_or_None)."""
+    """Strictly parse a parameter list. Returns (params, index_at_RPAREN_or_None, end_index)."""
     params: list[Parameter] = []
     i = _skip_newlines(tokens, i)
     n = len(tokens)
     if i < n and tokens[i].kind == RPAREN:
-        return params, i
+        return params, i, i
     while i < n:
         i = _skip_newlines(tokens, i)
+        if i >= n:
+            return params, None, i
         tok = tokens[i]
         if tok.kind == IDENT and tok.value == "String":
             i += 1
             i = _skip_newlines(tokens, i)
             if i >= n or tokens[i].kind != IDENT:
-                return params, None
+                return params, None, i
             tok = tokens[i]
         if tok.kind != IDENT:
-            return params, None
+            return params, None, i
         name = tok.value
         if VAR_NAME_RE.fullmatch(name) is None:
-            return params, None
+            return params, None, i
         params.append(Parameter(name, Span(tok.line, tok.col)))
         i += 1
         i = _skip_newlines(tokens, i)
         if i >= n:
-            return params, None
+            return params, None, i
         if tokens[i].kind == COMMA:
             i += 1
             i = _skip_newlines(tokens, i)
             if i < n and tokens[i].kind == RPAREN:
-                return params, None
+                return params, None, i
             continue
         if tokens[i].kind == RPAREN:
-            return params, i
-        return params, None
-    return params, None
+            return params, i, i
+        return params, None, i
+    return params, None, i
 
 
 def parse_single_definition(
@@ -222,6 +233,7 @@ def parse_single_definition(
     path: Path | str,
     *,
     label: str = "Library file",
+    postlude: bool = False,
 ) -> tuple[Definition | None, list[Finding], int, bool]:
     """Parse one ``def <name>(<params>) { <body> }`` starting at ``tokens[start] == 'def'``.
 
@@ -231,8 +243,22 @@ def parse_single_definition(
     n = len(tokens)
     tok = tokens[start]
     def_line, def_col = tok.line, tok.col
+
+    def _unclosed_postlude_finding() -> Finding:
+        return _finding(
+            PB_GROOVY_POSTLUDE,
+            "The Groovy content after the pipeline block is not closed: the file ends in the middle of this statement. It was skipped without evaluation.",
+            def_line,
+            def_col,
+            construct="function definition after the pipeline block",
+            suggestion="Recreate the needed behavior deliberately in the workflow (a step or a repository script); do not assume this code runs after the migrated pipeline.",
+        )
+
     i = start + 1
     if i >= n or tokens[i].kind != IDENT:
+        if postlude and (i >= n or tokens[min(i, n - 1)].kind == EOF):
+            findings.append(_unclosed_postlude_finding())
+            return None, findings, n, True
         findings.append(
             _finding(
                 PB_LIB_CALL,
@@ -256,6 +282,9 @@ def parse_single_definition(
         return None, findings, i + 1, False
     i += 1
     if i >= n or tokens[i].kind != LPAREN:
+        if postlude and (i >= n or tokens[min(i, n - 1)].kind == EOF):
+            findings.append(_unclosed_postlude_finding())
+            return None, findings, n, True
         findings.append(
             _finding(
                 PB_LIB_CALL,
@@ -266,8 +295,11 @@ def parse_single_definition(
         )
         return None, findings, i, False
     i += 1
-    params, rparen = _parse_params(tokens, i)
+    params, rparen, end_i = _parse_params(tokens, i)
     if rparen is None:
+        if postlude and (end_i >= n or tokens[end_i].kind == EOF):
+            findings.append(_unclosed_postlude_finding())
+            return None, findings, n, True
         findings.append(
             _finding(
                 PB_LIB_CALL,
@@ -276,11 +308,14 @@ def parse_single_definition(
                 name_tok.col,
             )
         )
-        return None, findings, i, True
+        return None, findings, end_i, True
     i = rparen + 1
     while i < n and tokens[i].kind == NEWLINE:
         i += 1
     if i >= n or tokens[i].kind != LBRACE:
+        if postlude and (i >= n or tokens[i].kind == EOF):
+            findings.append(_unclosed_postlude_finding())
+            return None, findings, n, True
         findings.append(
             _finding(
                 PB_LIB_CALL,
@@ -295,6 +330,8 @@ def parse_single_definition(
     body_start = i
     while i < n:
         k = tokens[i].kind
+        if k == EOF:
+            break
         if k == LBRACE:
             depth += 1
         elif k == RBRACE:
@@ -304,6 +341,9 @@ def parse_single_definition(
         i += 1
     body_end = i
     if depth != 0:
+        if postlude:
+            findings.append(_unclosed_postlude_finding())
+            return None, findings, n, True
         findings.append(
             _finding(
                 PB_LIB_CALL,

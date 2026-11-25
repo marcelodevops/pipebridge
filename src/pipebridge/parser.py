@@ -562,51 +562,57 @@ class _Parser:
                 stmt_start = self._pos
                 start_tok = tok
                 construct = self._postlude_construct()
-                terminated, shape = self._skip_surrounding_statement()
-                if shape is not None:
-                    return None
-                stmt_end = self._pos
-                if not terminated:
-                    findings.append(
-                        self._make(
-                            PB_GROOVY_POSTLUDE,
-                            construct,
-                            "The Groovy content after the pipeline block is not "
-                            "closed: the file ends in the middle of this statement. "
-                            "It was skipped without evaluation.",
-                            start_tok.line,
-                            start_tok.col,
-                            "Recreate the needed behavior deliberately in the "
-                            "workflow (a step or a repository script); do not "
-                            "assume this code runs after the migrated pipeline.",
-                        )
-                    )
-                    continue
 
-                stmt_tokens = self._tokens[stmt_start:stmt_end]
-                if (
-                    len(stmt_tokens) >= 3
-                    and stmt_tokens[0].kind == IDENT
-                    and stmt_tokens[0].value == "def"
-                    and stmt_tokens[1].kind == IDENT
-                    and stmt_tokens[2].kind == LPAREN
-                ):
-                    name_tok = stmt_tokens[1]
+                is_helper_candidate = (
+                    tok.kind == IDENT
+                    and tok.value == "def"
+                    and self._peek(1).kind == IDENT
+                    and self._peek(2).kind == LPAREN
+                )
+
+                if is_helper_candidate:
+                    name_tok = self._peek(1)
                     name = name_tok.value
                     helper_names.add(name)
-                    defn, def_findings, next_i, _stop = parse_single_definition(
-                        stmt_tokens,
-                        0,
+                    defn, def_findings, next_i, stop = parse_single_definition(
+                        self._tokens,
+                        stmt_start,
                         caller_path,
                         label="Postlude helper in",
+                        postlude=True,
                     )
+                    if any(f.code == PB_GROOVY_POSTLUDE for f in def_findings):
+                        findings.extend(def_findings)
+                        self._pos = len(self._tokens) - 1
+                        break
+
+                    if defn is None:
+                        for f in def_findings:
+                            findings.append(
+                                replace(f, source_path=str(caller_path))
+                                if f.source_path is None
+                                else f
+                            )
+                        invalid_helpers.add(name)
+                        i = next_i
+                        while i < len(self._tokens) and self._tokens[i].kind not in (NEWLINE, SEMI, EOF):
+                            i += 1
+                        while i < len(self._tokens) and self._tokens[i].kind in (NEWLINE, SEMI):
+                            i += 1
+                        self._pos = i
+                        if stop:
+                            break
+                        continue
+
                     # Any trailing tokens after the closing '}' of the helper body
                     # on the same statement make the helper definition malformed.
-                    while next_i < len(stmt_tokens) and stmt_tokens[next_i].kind == NEWLINE:
-                        next_i += 1
-                    if defn is not None and next_i != len(stmt_tokens):
-                        trail = stmt_tokens[next_i]
-                        def_findings.append(
+                    trail_idx = next_i
+                    if (
+                        trail_idx < len(self._tokens)
+                        and self._tokens[trail_idx].kind not in (NEWLINE, SEMI, EOF)
+                    ):
+                        trail = self._tokens[trail_idx]
+                        findings.append(
                             self._make(
                                 PB_LIB_CALL,
                                 "postlude helper",
@@ -616,7 +622,26 @@ class _Parser:
                                 "Keep each postlude helper definition as a standalone def <name>(...) { ... } block.",
                             )
                         )
-                    if def_findings or defn is None:
+                        invalid_helpers.add(name)
+                        while (
+                            trail_idx < len(self._tokens)
+                            and self._tokens[trail_idx].kind not in (NEWLINE, SEMI, EOF)
+                        ):
+                            trail_idx += 1
+                        while (
+                            trail_idx < len(self._tokens)
+                            and self._tokens[trail_idx].kind in (NEWLINE, SEMI)
+                        ):
+                            trail_idx += 1
+                        self._pos = trail_idx
+                        continue
+
+                    i = next_i
+                    while i < len(self._tokens) and self._tokens[i].kind in (NEWLINE, SEMI):
+                        i += 1
+                    self._pos = i
+
+                    if def_findings:
                         for f in def_findings:
                             findings.append(
                                 replace(f, source_path=str(caller_path))
@@ -699,6 +724,26 @@ class _Parser:
                     continue
 
                 # Executable / non-helper postlude statement: keep existing PB-GROOVY-POSTLUDE.
+                terminated, shape = self._skip_surrounding_statement()
+                if shape is not None:
+                    return None
+                if not terminated:
+                    findings.append(
+                        self._make(
+                            PB_GROOVY_POSTLUDE,
+                            construct,
+                            "The Groovy content after the pipeline block is not "
+                            "closed: the file ends in the middle of this statement. "
+                            "It was skipped without evaluation.",
+                            start_tok.line,
+                            start_tok.col,
+                            "Recreate the needed behavior deliberately in the "
+                            "workflow (a step or a repository script); do not "
+                            "assume this code runs after the migrated pipeline.",
+                        )
+                    )
+                    break
+
                 findings.append(
                     self._make(
                         PB_GROOVY_POSTLUDE,
