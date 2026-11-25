@@ -42,6 +42,7 @@ from .model import Span
 VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 BUILTIN_STEPS = {"sh", "echo", "checkout", "withCredentials", "stash", "unstash"}
+POSTLUDE_SHADOWED_STEPS = BUILTIN_STEPS | {"script"}
 
 
 class LibraryParseError(PipebridgeError):
@@ -215,6 +216,125 @@ def _parse_params(tokens, i):
     return params, None
 
 
+def parse_single_definition(
+    tokens: list[Token],
+    start: int,
+    path: Path | str,
+    *,
+    label: str = "Library file",
+) -> tuple[Definition | None, list[Finding], int, bool]:
+    """Parse one ``def <name>(<params>) { <body> }`` starting at ``tokens[start] == 'def'``.
+
+    Returns ``(definition_or_None, findings, next_index, stop_scanning)``.
+    """
+    findings: list[Finding] = []
+    n = len(tokens)
+    tok = tokens[start]
+    def_line, def_col = tok.line, tok.col
+    i = start + 1
+    if i >= n or tokens[i].kind != IDENT:
+        findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"{label} '{path}' is malformed: expected a definition name.",
+                def_line,
+                def_col,
+            )
+        )
+        return None, findings, i, False
+    name_tok = tokens[i]
+    name = name_tok.value
+    if VAR_NAME_RE.fullmatch(name) is None:
+        findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"{label} '{path}' is malformed: invalid definition name '{name}'.",
+                name_tok.line,
+                name_tok.col,
+            )
+        )
+        return None, findings, i + 1, False
+    i += 1
+    if i >= n or tokens[i].kind != LPAREN:
+        findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"{label} '{path}' is malformed: expected '(' after '{name}'.",
+                name_tok.line,
+                name_tok.col,
+            )
+        )
+        return None, findings, i, False
+    i += 1
+    params, rparen = _parse_params(tokens, i)
+    if rparen is None:
+        findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"{label} '{path}' is malformed: invalid parameter list for '{name}'.",
+                name_tok.line,
+                name_tok.col,
+            )
+        )
+        return None, findings, i, True
+    i = rparen + 1
+    while i < n and tokens[i].kind == NEWLINE:
+        i += 1
+    if i >= n or tokens[i].kind != LBRACE:
+        findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"{label} '{path}' is malformed: expected '{{' to start '{name}' body.",
+                name_tok.line,
+                name_tok.col,
+            )
+        )
+        return None, findings, i, False
+    # skip body by brace depth (token-level; braces in strings already hidden)
+    depth = 0
+    body_start = i
+    while i < n:
+        k = tokens[i].kind
+        if k == LBRACE:
+            depth += 1
+        elif k == RBRACE:
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body_end = i
+    if depth != 0:
+        findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"{label} '{path}' is malformed: unterminated body for '{name}'.",
+                name_tok.line,
+                name_tok.col,
+            )
+        )
+        return None, findings, i, True
+    # duplicate parameter names
+    names = [p.name for p in params]
+    dup = next((x for x in set(names) if names.count(x) > 1), None)
+    if dup is not None:
+        findings.append(
+            _finding(
+                PB_LIB_CALL,
+                f"{label} '{path}' definition '{name}' has duplicate parameter '{dup}'.",
+                name_tok.line,
+                name_tok.col,
+            )
+        )
+    body_tokens = tuple(tokens[body_start + 1 : body_end])
+    defn = Definition(
+        name=name,
+        params=tuple(params),
+        span=Span(name_tok.line, name_tok.col),
+        body=body_tokens,
+    )
+    return defn, findings, body_end + 1, False
+
+
 def _parse_definitions(tokens: list[Token], path: Path) -> tuple[list[Definition], list[Finding]]:
     definitions: list[Definition] = []
     findings: list[Finding] = []
@@ -242,119 +362,30 @@ def _parse_definitions(tokens: list[Token], path: Path) -> tuple[list[Definition
             while i < n and tokens[i].kind != NEWLINE:
                 i += 1
             continue
-        def_line, def_col = tok.line, tok.col
-        i += 1
-        if i >= n or tokens[i].kind != IDENT:
-            findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library file '{path}' is malformed: expected a definition name.",
-                    def_line,
-                    def_col,
-                )
-            )
-            continue
-        name_tok = tokens[i]
-        name = name_tok.value
-        if VAR_NAME_RE.fullmatch(name) is None:
-            findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library file '{path}' is malformed: invalid definition name '{name}'.",
-                    name_tok.line,
-                    name_tok.col,
-                )
-            )
-            i += 1
-            continue
-        i += 1
-        if i >= n or tokens[i].kind != LPAREN:
-            findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library file '{path}' is malformed: expected '(' after '{name}'.",
-                    name_tok.line,
-                    name_tok.col,
-                )
-            )
-            continue
-        i += 1
-        params, rparen = _parse_params(tokens, i)
-        if rparen is None:
-            findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library file '{path}' is malformed: invalid parameter list for '{name}'.",
-                    name_tok.line,
-                    name_tok.col,
-                )
-            )
+        defn, def_findings, next_i, stop = parse_single_definition(
+            tokens, i, path, label="Library file"
+        )
+        findings.extend(def_findings)
+        i = next_i
+        if stop:
             break
-        i = rparen + 1
-        while i < n and tokens[i].kind == NEWLINE:
-            i += 1
-        if i >= n or tokens[i].kind != LBRACE:
-            findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library file '{path}' is malformed: expected '{{' to start '{name}' body.",
-                    name_tok.line,
-                    name_tok.col,
-                )
-            )
+        if defn is None:
             continue
-        # skip body by brace depth (token-level; braces in strings already hidden)
-        depth = 0
-        body_start = i
-        while i < n:
-            k = tokens[i].kind
-            if k == LBRACE:
-                depth += 1
-            elif k == RBRACE:
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        body_end = i
-        if depth != 0:
-            findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library file '{path}' is malformed: unterminated body for '{name}'.",
-                    name_tok.line,
-                    name_tok.col,
-                )
-            )
-            break
-        # duplicate parameter names
-        names = [p.name for p in params]
-        dup = next((x for x in set(names) if names.count(x) > 1), None)
-        if dup is not None:
-            findings.append(
-                _finding(
-                    PB_LIB_CALL,
-                    f"Library file '{path}' definition '{name}' has duplicate parameter '{dup}'.",
-                    name_tok.line,
-                    name_tok.col,
-                )
-            )
-        body_tokens = tuple(tokens[body_start + 1 : body_end])
-        defn = Definition(name=name, params=tuple(params), span=Span(name_tok.line, name_tok.col), body=body_tokens)
         definitions.append(defn)
+        name = defn.name
         if name in definition_names:
             findings.append(
                 _finding(
                     PB_LIB_CALL,
                     f"Library file '{path}' has a duplicate definition '{name}'.",
-                    name_tok.line,
-                    name_tok.col,
+                    defn.span.line,
+                    defn.span.col,
                 )
             )
         else:
             definition_names.add(name)
         if name == "call":
             call_count += 1
-        i = body_end + 1
 
     if call_count == 0:
         findings.append(

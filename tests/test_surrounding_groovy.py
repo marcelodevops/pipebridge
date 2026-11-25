@@ -240,6 +240,8 @@ def test_combined_prelude_and_postlude():
 
 
 def test_step_calling_helper_function_still_blocked_by_existing_rules():
+    # Calling a defined postlude helper with wrong arity blocks the stage via
+    # PB-LIB-CALL and marks the helper reached (no spurious PB-GROOVY-POSTLUDE).
     source = (
         PIPELINE.replace("echo 'x'", "helper('arg')")
         + "\n"
@@ -249,12 +251,24 @@ def test_step_calling_helper_function_still_blocked_by_existing_rules():
     )
     result = parse(source)
     assert result.pipeline is not None
-    # Existing unsupported-step blocker fires; the call was not translated.
-    assert "PB-SYNTAX" in blocker_codes(result)
-    assert "PB-GROOVY-POSTLUDE" in blocker_codes(result)
+    assert blocker_codes(result) == ["PB-LIB-CALL"]
     stage = result.pipeline.stages[0]
     assert stage.blocked is True
     assert stage.steps == []
+
+    # Calling an unknown step while a postlude helper is unreached keeps
+    # PB-SYNTAX for the unknown step and PB-GROOVY-POSTLUDE for the unused helper.
+    unknown_call_source = (
+        PIPELINE.replace("echo 'x'", "otherStep('arg')")
+        + "\n"
+        + "def helper() {\n"
+        + "    echo 'after'\n"
+        + "}\n"
+    )
+    unknown_result = parse(unknown_call_source)
+    assert unknown_result.pipeline is not None
+    assert "PB-SYNTAX" in blocker_codes(unknown_result)
+    assert "PB-GROOVY-POSTLUDE" in blocker_codes(unknown_result)
 
 
 def test_step_referencing_imported_symbol_still_blocked():

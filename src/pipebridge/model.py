@@ -47,6 +47,7 @@ class Step:
     # References into CredentialInventory. Not copies of binding data.
     credential_binding_ids: tuple[str, ...] = ()
     args: tuple[str, ...] = ()
+    arg_dollar_spans: tuple[tuple[str, tuple[tuple[int, int, int], ...]], ...] = ()
     script_path: str | None = None
     stash_includes: str | None = None
     stash_excludes: str | None = None

@@ -307,6 +307,10 @@ def _scan_translated(pipeline: Pipeline) -> list[Finding]:
             findings.extend(
                 _scan_github_expressions(step.text, step.dollar_spans, label)
             )
+            for arg_text, arg_spans in getattr(step, "arg_dollar_spans", ()):
+                findings.extend(
+                    _scan_github_expressions(arg_text, arg_spans, label)
+                )
         for env_var in stage.env:
             findings.extend(_scan_env_value(env_var, f"stage '{stage.name}' environment"))
     for env_var in pipeline.env:

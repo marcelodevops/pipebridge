@@ -41,7 +41,15 @@ from .findings import Finding, REGISTRY, PB_AGENT, PB_ASSUME_LIBRARY, PB_CRED, P
 from .groovystrings import Decoded, decode_string
 from .librarybody import Resolver as LibraryBodyResolver
 from .librarymap import LIBRARY_NAME_RE, LibraryMap
-from .libraryresolver import discover_vars, unused_library_findings
+from .libraryresolver import (
+    Definition,
+    LibraryVar,
+    POSTLUDE_SHADOWED_STEPS,
+    VAR_NAME_RE,
+    discover_vars,
+    parse_single_definition,
+    unused_library_findings,
+)
 from .stash import parse_stash_tokens, parse_unstash_tokens, validate_job_stashes
 from .lexer import (
     ANNOTATION,
@@ -171,6 +179,11 @@ class _Parser:
         self._library_load_failed = False
         self._library_resolver: LibraryBodyResolver | None = None
         self._discovered_by_name: dict[str, list] = {}
+        self._postlude_helper_names: set[str] = set()
+        self._invalid_postlude_helpers: set[str] = set()
+        self._postlude_helper_decls: list[tuple[str, object, str]] = []
+        self._reached_postlude_helpers: set[str] = set()
+        self._prescanned_postlude_findings: list[Finding] | None = None
         self._binding_seq = 0
         # Required-structure bookkeeping: which stages parsed a steps
         # section, and which of those sections were non-empty.
@@ -442,31 +455,281 @@ class _Parser:
         self._findings.extend(validate_job_stashes(self.pipeline))
 
     def _prepare_library_resolver(self, buffered: list[Finding]) -> None:
-        """Restrict library discovery and resolution to declared, mapped libraries."""
+        """Restrict library discovery and resolution to declared, mapped libraries
+        and pre-scan eligible Jenkinsfile postlude helper definitions."""
         if self.library_map is not None:
             buffered.extend(
                 unused_library_findings(
                     self.library_map, set(self._resolved_libraries.keys())
                 )
             )
-        if not self._resolved_libraries or self.library_map is None:
-            return
-        restricted_map = LibraryMap(
-            entries={
-                name: self.library_map.entries[name]
-                for name in sorted(self._resolved_libraries)
-            }
-        )
-        discovered, disc_findings = discover_vars(restricted_map)
-        if disc_findings:
-            buffered.extend(disc_findings)
+        restricted_map: LibraryMap | None = None
+        discovered = []
+        if self._resolved_libraries and self.library_map is not None:
+            restricted_map = LibraryMap(
+                entries={
+                    name: self.library_map.entries[name]
+                    for name in sorted(self._resolved_libraries)
+                }
+            )
+            discovered, disc_findings = discover_vars(restricted_map)
+            if disc_findings:
+                buffered.extend(disc_findings)
+                self._library_load_failed = True
+            for item in discovered:
+                self._discovered_by_name.setdefault(item.name, []).append(item)
+                loaded = self._resolved_libraries.get(item.library)
+                if loaded is not None and item.name not in loaded.discovered_vars:
+                    loaded.discovered_vars.append(item.name)
+
+        local_var = self._prescan_postlude_helpers()
+        if restricted_map is not None or local_var is not None:
+            self._library_resolver = LibraryBodyResolver(
+                restricted_map,
+                discovered,
+                local_var=local_var,
+            )
+
+    def _find_postlude_start(self) -> int | None:
+        """Return token index immediately after the closing '}' of pipeline { ... }.
+
+        Returns None when the pipeline block is malformed/unterminated or when
+        the postlude contains another 'pipeline' block occurrence (leaving the
+        existing _parse_pipeline / _scan_postlude error paths unchanged).
+        """
+        idx = self._pos
+        n = len(self._tokens)
+        if idx >= n or self._tokens[idx].kind != IDENT or self._tokens[idx].value != "pipeline":
+            return None
+        idx += 1
+        while idx < n and self._tokens[idx].kind in (NEWLINE, SEMI):
+            idx += 1
+        if idx >= n or self._tokens[idx].kind != LBRACE:
+            return None
+        depth = 0
+        while idx < n:
+            tok = self._tokens[idx]
+            if tok.kind == EOF:
+                return None
+            if tok.kind == LBRACE:
+                depth += 1
+            elif tok.kind == RBRACE:
+                depth -= 1
+                if depth == 0:
+                    postlude_start = idx + 1
+                    break
+            idx += 1
+        else:
+            return None
+
+        # If any postlude token contains a top-level 'pipeline' or nested
+        # 'pipeline {', defer to _scan_postlude() so MalformedPipelineError
+        # is raised after _validate_required_structure() as before.
+        j = postlude_start
+        while j < n:
+            t = self._tokens[j]
+            if t.kind == IDENT and t.value == "pipeline":
+                if j + 1 < n and self._tokens[j + 1].kind == LBRACE:
+                    return None
+            j += 1
+        return postlude_start
+
+    def _prescan_postlude_helpers(self) -> LibraryVar | None:
+        """Pre-scan top-level postlude statements for eligible def helper(...) definitions."""
+        postlude_start = self._find_postlude_start()
+        if postlude_start is None:
+            return None
+
+        saved_pos = self._pos
+        self._pos = postlude_start
+        findings: list[Finding] = []
+        definitions: list[Definition] = []
+        seen_names: set[str] = set()
+        helper_names: set[str] = set()
+        invalid_helpers: set[str] = set()
+        helper_decls: list[tuple[str, object, str]] = []
+        caller_path = Path(self.source_path or "Jenkinsfile")
+
+        try:
+            while True:
+                self._skip_newlines()
+                tok = self._peek()
+                if tok.kind == EOF:
+                    break
+                if tok.kind == IDENT and tok.value == "pipeline":
+                    # Top-level pipeline token: defer to _scan_postlude.
+                    return None
+                stmt_start = self._pos
+                start_tok = tok
+                construct = self._postlude_construct()
+                terminated, shape = self._skip_surrounding_statement()
+                if shape is not None:
+                    return None
+                stmt_end = self._pos
+                if not terminated:
+                    findings.append(
+                        self._make(
+                            PB_GROOVY_POSTLUDE,
+                            construct,
+                            "The Groovy content after the pipeline block is not "
+                            "closed: the file ends in the middle of this statement. "
+                            "It was skipped without evaluation.",
+                            start_tok.line,
+                            start_tok.col,
+                            "Recreate the needed behavior deliberately in the "
+                            "workflow (a step or a repository script); do not "
+                            "assume this code runs after the migrated pipeline.",
+                        )
+                    )
+                    continue
+
+                stmt_tokens = self._tokens[stmt_start:stmt_end]
+                if (
+                    len(stmt_tokens) >= 3
+                    and stmt_tokens[0].kind == IDENT
+                    and stmt_tokens[0].value == "def"
+                    and stmt_tokens[1].kind == IDENT
+                    and stmt_tokens[2].kind == LPAREN
+                ):
+                    name_tok = stmt_tokens[1]
+                    name = name_tok.value
+                    helper_names.add(name)
+                    defn, def_findings, next_i, _stop = parse_single_definition(
+                        stmt_tokens,
+                        0,
+                        caller_path,
+                        label="Postlude helper in",
+                    )
+                    # Any trailing tokens after the closing '}' of the helper body
+                    # on the same statement make the helper definition malformed.
+                    while next_i < len(stmt_tokens) and stmt_tokens[next_i].kind == NEWLINE:
+                        next_i += 1
+                    if defn is not None and next_i != len(stmt_tokens):
+                        trail = stmt_tokens[next_i]
+                        def_findings.append(
+                            self._make(
+                                PB_LIB_CALL,
+                                "postlude helper",
+                                f"Postlude helper '{name}' has unsupported trailing syntax '{trail.value}'.",
+                                trail.line,
+                                trail.col,
+                                "Keep each postlude helper definition as a standalone def <name>(...) { ... } block.",
+                            )
+                        )
+                    if def_findings or defn is None:
+                        for f in def_findings:
+                            findings.append(
+                                replace(f, source_path=str(caller_path))
+                                if f.source_path is None
+                                else f
+                            )
+                        invalid_helpers.add(name)
+                        continue
+
+                    if name in POSTLUDE_SHADOWED_STEPS:
+                        findings.append(
+                            Finding(
+                                code=PB_LIB_CALL,
+                                severity="blocker",
+                                construct="postlude helper",
+                                message=f"Postlude helper '{name}' shadows a built-in step.",
+                                line=name_tok.line,
+                                col=name_tok.col,
+                                suggestion="Rename the postlude helper so it does not shadow a built-in step.",
+                                source_path=str(caller_path),
+                            )
+                        )
+                        invalid_helpers.add(name)
+                        continue
+
+                    if name == "call":
+                        findings.append(
+                            Finding(
+                                code=PB_LIB_CALL,
+                                severity="blocker",
+                                construct="postlude helper",
+                                message="Postlude helper 'call' is reserved for shared-library vars/*.groovy entry points.",
+                                line=name_tok.line,
+                                col=name_tok.col,
+                                suggestion="Rename the postlude helper to a descriptive step name.",
+                                source_path=str(caller_path),
+                            )
+                        )
+                        invalid_helpers.add(name)
+                        continue
+
+                    if name in seen_names:
+                        findings.append(
+                            Finding(
+                                code=PB_LIB_CALL,
+                                severity="blocker",
+                                construct="postlude helper",
+                                message=f"Postlude helper '{name}' is defined more than once.",
+                                line=name_tok.line,
+                                col=name_tok.col,
+                                suggestion="Define each postlude helper name only once (method overloading is not supported).",
+                                source_path=str(caller_path),
+                            )
+                        )
+                        invalid_helpers.add(name)
+                        continue
+                    seen_names.add(name)
+
+                    if name in self._discovered_by_name:
+                        var_paths = sorted(
+                            str(d.path) for d in self._discovered_by_name[name]
+                        )
+                        findings.append(
+                            Finding(
+                                code=PB_LIB_CALL,
+                                severity="blocker",
+                                construct="postlude helper",
+                                message=f"Postlude helper '{name}' collides with library var '{var_paths[0]}'.",
+                                line=name_tok.line,
+                                col=name_tok.col,
+                                suggestion="Rename the postlude helper or remove the colliding shared-library var.",
+                                source_path=str(caller_path),
+                            )
+                        )
+                        invalid_helpers.add(name)
+                        continue
+
+                    definitions.append(defn)
+                    helper_decls.append((name, start_tok, construct))
+                    continue
+
+                # Executable / non-helper postlude statement: keep existing PB-GROOVY-POSTLUDE.
+                findings.append(
+                    self._make(
+                        PB_GROOVY_POSTLUDE,
+                        construct,
+                        "This Groovy content after the pipeline block is "
+                        "executable; pipebridge does not evaluate or translate "
+                        "it, and calls to it from steps remain unsupported and "
+                        "are reported separately.",
+                        start_tok.line,
+                        start_tok.col,
+                        "Recreate the needed behavior deliberately in the "
+                        "workflow (a step or a repository script); do not "
+                        "assume this code runs after the migrated pipeline.",
+                    )
+                )
+        finally:
+            self._pos = saved_pos
+
+        self._postlude_helper_names = helper_names
+        self._invalid_postlude_helpers = invalid_helpers
+        self._postlude_helper_decls = helper_decls
+        if invalid_helpers:
             self._library_load_failed = True
-        self._library_resolver = LibraryBodyResolver(restricted_map, discovered)
-        for item in discovered:
-            self._discovered_by_name.setdefault(item.name, []).append(item)
-            loaded = self._resolved_libraries.get(item.library)
-            if loaded is not None and item.name not in loaded.discovered_vars:
-                loaded.discovered_vars.append(item.name)
+        self._prescanned_postlude_findings = findings
+        if not definitions and not helper_names:
+            return None
+        return LibraryVar(
+            name="_jenkinsfile",
+            path=caller_path,
+            definitions=definitions,
+        )
 
     # ---- surrounding Groovy --------------------------------------------
 
@@ -859,13 +1122,34 @@ class _Parser:
     def _scan_postlude(self) -> list[Finding]:
         """Scan the Groovy after the pipeline block (helper functions, …).
 
-        Every statement after the block is executable surrounding Groovy and
-        produces a PB-GROOVY-POSTLUDE blocker; nothing is evaluated or
-        translated. Unterminated trailing content is reported the same way
-        (a blocker, not a parse error). A further ``pipeline`` occurrence —
-        at top level or inside a skipped statement — is rejected: pipebridge
-        never silently selects one of several pipeline blocks.
+        When postlude statements were pre-scanned, emit findings for any
+        non-helper postlude statements, any invalid/colliding postlude helper
+        definitions, and any valid postlude helper definitions that were never
+        reached during step translation. Otherwise run the fallback postlude
+        scan (including ambiguous 'pipeline' block detection).
         """
+        if self._prescanned_postlude_findings is not None:
+            findings = list(self._prescanned_postlude_findings)
+            for name, start_tok, construct in self._postlude_helper_decls:
+                if name not in self._reached_postlude_helpers:
+                    findings.append(
+                        self._make(
+                            PB_GROOVY_POSTLUDE,
+                            construct,
+                            "This Groovy content after the pipeline block is "
+                            "executable; pipebridge does not evaluate or translate "
+                            "it, and calls to it from steps remain unsupported and "
+                            "are reported separately.",
+                            start_tok.line,
+                            start_tok.col,
+                            "Recreate the needed behavior deliberately in the "
+                            "workflow (a step or a repository script); do not "
+                            "assume this code runs after the migrated pipeline.",
+                        )
+                    )
+            self._pos = len(self._tokens) - 1
+            return findings
+
         findings: list[Finding] = []
         while True:
             self._skip_newlines()
@@ -1842,8 +2126,13 @@ class _Parser:
                 if stage.blocked:
                     self._diagnose_steps_remainder(stage.name)
                     return
+            elif name in self._postlude_helper_names and self._library_resolver is not None:
+                self._parse_library_call(stage, tok, span, is_local_helper=True)
+                if stage.blocked:
+                    self._diagnose_steps_remainder(stage.name)
+                    return
             elif self._resolved_libraries and self._library_resolver is not None:
-                self._parse_library_call(stage, tok, span)
+                self._parse_library_call(stage, tok, span, is_local_helper=False)
                 if stage.blocked:
                     self._diagnose_steps_remainder(stage.name)
                     return
@@ -1872,11 +2161,20 @@ class _Parser:
                 self._diagnose_steps_remainder(stage.name)
                 return
 
-    def _parse_library_call(self, stage: Stage, tok, span: Span) -> None:
-        """Parse and resolve one custom step against declared, mapped libraries."""
+    def _parse_library_call(
+        self,
+        stage: Stage,
+        tok,
+        span: Span,
+        *,
+        is_local_helper: bool = False,
+    ) -> None:
+        """Parse and resolve one custom step against postlude helpers or declared, mapped libraries."""
         name = tok.value
         caller_path = self.source_path or "Jenkinsfile"
         root_frame = f"{caller_path}:{name}@{span.line}:{span.col}"
+        if is_local_helper:
+            self._reached_postlude_helpers.add(name)
         self._advance()  # consume step identifier
 
         def fail_call(message: str, line: int, col: int) -> None:
@@ -1918,6 +2216,7 @@ class _Parser:
 
         self._advance()  # consume '('
         args: list[str] = []
+        call_arg_dollar_spans: list[tuple[str, tuple[tuple[int, int, int], ...]]] = []
         while True:
             self._skip_newlines()
             cur = self._peek()
@@ -1941,6 +2240,8 @@ class _Parser:
                     )
                     return
                 args.append(dec.value)
+                if dec.dollar_spans:
+                    call_arg_dollar_spans.append((dec.value, tuple(dec.dollar_spans)))
                 self._advance()
             else:
                 fail_call(
@@ -1975,18 +2276,44 @@ class _Parser:
             )
             return
 
-        cands = self._discovered_by_name.get(name, [])
-        lib_name = (
-            cands[0].library
-            if len(cands) == 1
-            else next(iter(self._resolved_libraries))
-        )
-        res = self._library_resolver.resolve(
-            lib_name,
-            name,
-            args,
-            caller=(caller_path, span.line, span.col, name),
-        )
+        if is_local_helper:
+            if name in self._invalid_postlude_helpers:
+                self.library_inventory.calls.append(
+                    LibraryCallRecord(
+                        name=name,
+                        library=None,
+                        status="blocked",
+                        source_path=caller_path,
+                        line=span.line,
+                        col=span.col,
+                        stage_name=stage.name,
+                        chain=(root_frame,),
+                        operations=(),
+                    )
+                )
+                self._mark_stage_blocked(stage)
+                return
+            lib_name = None
+            cands = []
+            res = self._library_resolver.resolve_local(
+                name,
+                args,
+                caller=(caller_path, span.line, span.col, name),
+            )
+            self._reached_postlude_helpers.update(res.visited_local_helpers)
+        else:
+            cands = self._discovered_by_name.get(name, [])
+            lib_name = (
+                cands[0].library
+                if len(cands) == 1
+                else next(iter(self._resolved_libraries))
+            )
+            res = self._library_resolver.resolve(
+                lib_name,
+                name,
+                args,
+                caller=(caller_path, span.line, span.col, name),
+            )
 
         binding_ids: list[str] = []
         cred_collision = False
@@ -2058,9 +2385,15 @@ class _Parser:
             self._mark_stage_blocked(stage)
             return
 
-        loaded = self._resolved_libraries.get(lib_name)
-        if loaded is not None and name not in loaded.vars:
-            loaded.vars.append(name)
+        if lib_name is not None:
+            loaded = self._resolved_libraries.get(lib_name)
+            if loaded is not None and name not in loaded.vars:
+                loaded.vars.append(name)
+        for op in res.operations:
+            if op.library is not None and op.var_name is not None:
+                op_loaded = self._resolved_libraries.get(op.library)
+                if op_loaded is not None and op.var_name not in op_loaded.vars:
+                    op_loaded.vars.append(op.var_name)
 
         chain = (
             res.operations[-1].call_chain
@@ -2139,8 +2472,16 @@ class _Parser:
                     )
                 )
             else:
-                rel_script = (
-                    f"scripts/{op.library}/{op.var_name}/{op.func_name}-{op.step_index}.sh"
+                if op.library is None:
+                    rel_script = f"scripts/_jenkinsfile/{op.func_name}-{op.step_index}.sh"
+                else:
+                    rel_script = (
+                        f"scripts/{op.library}/{op.var_name}/{op.func_name}-{op.step_index}.sh"
+                    )
+                step_arg_spans = tuple(
+                    (a_val, a_spans)
+                    for a_val, a_spans in call_arg_dollar_spans
+                    if a_val in op.args
                 )
                 stage.steps.append(
                     Step(
@@ -2149,6 +2490,7 @@ class _Parser:
                         span=op.span or span,
                         credential_binding_ids=op_binding_ids,
                         args=op.args,
+                        arg_dollar_spans=step_arg_spans,
                         script_path=rel_script,
                         source_path=str(op.path) if op.path is not None else None,
                     )
@@ -2469,9 +2811,17 @@ class _Parser:
     def _stage_for_binding(self, entry: CredentialBinding) -> Stage | None:
         if self.pipeline is None:
             return None
+        entry_line = entry.span.line
+        if entry.call_chain:
+            root = entry.call_chain[0]
+            at_idx = root.rfind("@")
+            if at_idx != -1:
+                line_str = root[at_idx + 1 :].split(":", 1)[0]
+                if line_str.isdigit():
+                    entry_line = int(line_str)
         chosen: Stage | None = None
         for stage in self.pipeline.stages:
-            if stage.name != entry.stage_name or stage.span.line > entry.span.line:
+            if stage.name != entry.stage_name or stage.span.line > entry_line:
                 continue
             if chosen is None or stage.span.line > chosen.span.line:
                 chosen = stage
