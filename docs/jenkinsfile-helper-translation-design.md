@@ -135,25 +135,58 @@ translated under an ambiguous definition:
    `PB-LIB-CALL` at the postlude helper's `<name>`:
    `Postlude helper '<name>' collides with library var '<var_path>'.`
 
-### 3.4 Unused postlude helper definitions (explicit policy)
+### 3.4 Unused postlude helper definitions and reachability tracking
 
 Postlude helpers are top-level Groovy statements. **pipebridge never silently
-discards an unreached postlude helper definition.**
+discards an unreached postlude helper definition, and never emits a spurious
+unused-helper blocker for a helper that was actually visited during step
+resolution.**
 
-- A postlude helper is **reached** if and only if at least one step in a stage
-  `steps { ... }` block invokes it directly, or reaches it transitively through
-  another reached helper's body during `_parse_steps` resolution.
-- Calls inside untranslated or opaque constructs (`post { ... }`, `when { ... }`,
-  `parallel { ... }`, `script { ... }`, or steps after a stage has already been
-  marked blocked and switched to `_diagnose_steps_remainder`) are not
-  translated and do **not** mark a helper reached.
-- After `_parse_pipeline()` completes, every postlude helper definition that
-  was **not reached** emits `PB-GROOVY-POSTLUDE` at its `def` token (same code,
-  line, col, construct `function definition after the pipeline block`, and
-  message as today), which marks the pipeline blocked.
+Exact reachability rules:
+
+- **Independent visited-helper tracking**: `Resolver` and `Resolution` track
+  `visited_local_helpers: set[str]` independently of `Resolution.operations`
+  and `Stage.steps`.
+  - A postlude helper name `<name>` is added to `visited_local_helpers` as soon
+    as `_parse_library_call` dispatches a top-level call to `<name>`, and
+    whenever `Resolver._do_invocation` or `Resolver._expand` resolves or enters
+    a same-file postlude helper `<callee>` during active step resolution.
+  - Because `visited_local_helpers` is stored as analysis state on the parser /
+    `Resolution` (and merged into `self._reached_postlude_helpers` before any
+    branch on `res.blocked`), a visited helper **remains reached** even when:
+    1. Its own call site fails argument or arity validation (`PB-LIB-CALL`).
+    2. Its own body (or a transitive callee's body) fails resolution
+       (`PB-LIB-CALL`, `PB-INTERP`, `PB-CRED`, cycle detection, or depth cap),
+       causing `res.operations` to be cleared (`res.operations = []`).
+    3. It resolves cleanly, and a subsequent step or directive in the same
+       stage later blocks and clears the stage (`_mark_stage_blocked(stage)` ->
+       `stage.steps.clear()`).
+- **Transitive visits count**: If a stage step calls `helperA()`, and
+  `helperA()` calls `helperB()` before or at a failure point, both `helperA`
+  and `helperB` are recorded in `visited_local_helpers` and neither receives
+  an unused-helper finding. (If `helperA()` fails *before* reaching the statement
+  that calls `helperB()`, and nothing else calls `helperB()`, `helperB` was
+  never visited and remains unreached.)
+- **Diagnostic and opaque traversal never count**: Calls encountered only
+  inside diagnostic traversal (`_diagnose_steps_remainder`,
+  `_diagnose_wrapper_body`, `_diagnose_stage`, etc., after the enclosing stage
+  or wrapper is already blocked) or inside untranslated/opaque constructs
+  (`post { ... }`, `when { ... }`, `parallel { ... }`, `script { ... }`) never
+  enter `Resolver` and do **not** mark any helper as visited.
+- **Post-pipeline unused check**: After `_parse_pipeline()` completes, every
+  postlude helper definition not in `self._reached_postlude_helpers` emits
+  `PB-GROOVY-POSTLUDE` at its `def` token (same code, line, col, construct
+  `function definition after the pipeline block`, and message as today), which
+  marks the pipeline blocked.
 - Consequently:
   - A pipeline where every postlude helper is valid and reached by translated
     steps emits **no** `PB-GROOVY-POSTLUDE`.
+  - A failing reached helper (such as
+    `examples/jenkinsfile-helpers/negative/unsupported-body.Jenkinsfile` or
+    `recursion.Jenkinsfile`) or a valid reached helper in a stage later blocked
+    by an unrelated step (such as `mavenBuild(...)` followed by `Result.dump()`
+    in `tests/fixtures/calls-to-helper/Jenkinsfile`) emits its specific call or
+    stage blocker and **no** spurious `PB-GROOVY-POSTLUDE`.
   - A pipeline with dead/unreferenced postlude helpers, or helpers only
     referenced from `post` / `when` / `parallel` / `script` blocks (such as the
     existing `postlude-functions`, `java-maven-jetty-like`,
@@ -262,7 +295,7 @@ classification.
   generated scripts participate in `--force` overwrite checks, staged writes,
   and handled-`OSError` rollback via `_write_all`.
 
-### 3.9 Provenance, stage clearing, and report contract
+### 3.9 Provenance, stage clearing, stage-blocker attribution, and report contract
 
 - Every `Operation`, `LibraryCredential`, `LibraryCallRecord`, and `Finding`
   produced during postlude helper resolution carries:
@@ -276,17 +309,41 @@ classification.
   loaded.
 - If a stage is later blocked and cleared (`_mark_stage_blocked(stage)`), its
   collected `stage.steps` are cleared (so no scripts are emitted for that
-  stage), while `CredentialInventory` and `LibraryInventory.calls` retain the
-  recorded bindings and call records.
-- In `src/pipebridge/workflow.py`, `_stage_blocker_codes(blockers, stage, next_stage)`
-  attributes a blocker finding to `stage` either when `f.line` falls within
-  `[stage.span.line, next_stage.span.line)` (for findings without a
-  `call_chain`) **or** when the root frame of `f.call_chain` has a call-site
-  line within `[stage.span.line, next_stage.span.line)`. This ensures a
-  blocker inside a postlude helper (whose `f.line` is at the bottom of the
-  Jenkinsfile) or inside a `vars/*.groovy` file is listed on the calling
-  stage's `[NOT MIGRATED] <Stage>` placeholder rather than misattributed to the
-  last stage.
+  stage), while `CredentialInventory`, `LibraryInventory.calls`, and
+  `self._reached_postlude_helpers` retain the recorded bindings, call records,
+  and visited helper names.
+- **Stage-blocker attribution and compatibility guarantees**:
+  - In `src/pipebridge/workflow.py`, `_stage_blocker_codes(blockers, stage, next_stage)`
+    currently checks only `stage.span.line <= f.line < upper`. When a blocker
+    originates inside a postlude helper (where `f.line` is after `pipeline { ... }`)
+    or inside a `vars/*.groovy` shared-library file (where `f.line` is a line
+    number in that external file), `f.line` is the callee token line rather
+    than the stage call-site line.
+  - Updated rule:
+    - When `f.call_chain` is **non-empty**, extract the root call-site line
+      `<call_line>` from `f.call_chain[0]` (`<path>:<name>@<call_line>:<call_col>`)
+      and attribute `f.code` to `stage` iff
+      `stage.span.line <= call_line < upper`. (Do not match raw `f.line` when
+      `f.call_chain` is present, so a `vars/*.groovy` line number or postlude
+      line number never collides with an unrelated stage's line span.)
+    - When `f.call_chain` is **empty** (all direct Jenkinsfile findings), test
+      `stage.span.line <= f.line < upper` exactly as today.
+  - **Compatibility reconciliation**:
+    - For all unaffected inputs (pipelines without blocked shared-library calls
+      or postlude helpers, including every enabled workflow, pure-declarative
+      golden, D2 baseline, and non-library blocked draft), `f.call_chain` is
+      empty and generated `workflow.yml` output remains **byte-for-byte
+      identical**.
+    - For existing blocked shared-library workflows where a blocker inside
+      `vars/*.groovy` carries `f.call_chain`, corrected blocker attribution in
+      the blocked stage's `# unsupported constructs (<codes>)` comment and
+      `[NOT MIGRATED] <Stage>` placeholder `echo` text is **explicitly
+      permitted** and verified with targeted before/after tests.
+    - This attribution refinement affects **only** the blocker-code summary text
+      inside already-blocked stage placeholders. The execution graph,
+      job-level disabled state (`if: false`), surviving steps of unblocked
+      stages, translation eligibility, and CLI exit codes remain completely
+      unchanged.
 
 ## 4. Fixtures included in this design PR
 
@@ -378,23 +435,58 @@ All fixtures live under
      job-order validation (duplicate stash name and unstash-before-stash fail
      with `PB-LIB-CALL`) and emits `pipebridge_stash.py`,
      `pipebridge_unstash.py`, and the final `always()` cleanup step.
-5. **Negative fixtures and provenance**:
+5. **Negative fixtures, reachability under failure/clearing, and provenance**:
    - Each negative fixture under `examples/jenkinsfile-helpers/negative/`
      exits `2`, emits a disabled workflow (`if: false`), writes no executable
      `scripts/` files, and reports the expected blocker code (`PB-LIB-CALL`,
      `PB-INTERP`, `PB-GROOVY-PRELUDE`, or `PB-GROOVY-POSTLUDE`) with accurate
      line, column, `source_path`, and `call_chain`.
-   - `_stage_blocker_codes` attributes a postlude-helper blocker in Stage 1 of
-     a multi-stage pipeline to Stage 1's `[NOT MIGRATED]` placeholder (via the
-     root `call_chain` frame) rather than the final stage.
-6. **Unchanged existing behavior and workflow bytes**:
-   - Existing inputs without postlude helpers — including
-     `examples/python-build`, `examples/shared-library/success`,
-     `examples/shared-library/failure`, `tests/baselines/d2/*.workflow.yml`,
-     and `tests/goldens/pure-declarative/*.workflow.yml` — produce
-     byte-for-byte identical `workflow.yml` output.
-   - Existing fixtures with unreached postlude helpers or executable postlude
-     statements (`postlude-functions`, `java-maven-jetty-like`,
+   - **Failing reached helper produces no spurious unused-helper finding**:
+     When a stage step invokes a postlude helper whose body (or transitive
+     postlude helper callee) fails resolution (`unsupported-body.Jenkinsfile`,
+     `captured-variable.Jenkinsfile`, `recursion.Jenkinsfile`, or `helperA ->
+     failingHelperB`), all visited helpers remain marked reached and **no**
+     `PB-GROOVY-POSTLUDE` finding is emitted for them.
+   - **Successful helper call followed by an unrelated stage blocker produces
+     no spurious unused-helper finding**: When a stage step invokes a postlude
+     helper (including transitive same-file helper forwarding) that resolves
+     cleanly, and a later step in the same stage blocks and clears the stage
+     (e.g., `script { ... }` or `Result.dump()` in
+     `tests/fixtures/calls-to-helper/Jenkinsfile`), the stage's steps are
+     cleared and no scripts are emitted for that stage, while all visited
+     helpers remain marked reached and **no** `PB-GROOVY-POSTLUDE` finding is
+     emitted.
+   - **Calls only in diagnostic/opaque traversal remain unreached**: A postlude
+     helper referenced only after a stage is already blocked (during
+     `_diagnose_steps_remainder` / `_diagnose_wrapper_body`), or only inside
+     `post`, `when`, `parallel`, or `script`, is not visited by `Resolver` and
+     still emits `PB-GROOVY-POSTLUDE`.
+   - **Stage-blocker attribution**: `_stage_blocker_codes` attributes a
+     postlude-helper or `vars/*.groovy` blocker via `f.call_chain[0]`'s
+     call-site line to the calling stage's `[NOT MIGRATED] <Stage>` placeholder
+     (and never to an unrelated stage whose line span happens to match the
+     callee's line number in `vars/*.groovy` or the Jenkinsfile postlude).
+6. **Compatibility and unchanged existing behavior**:
+   - **Byte-identical output for unaffected inputs**: Existing inputs without
+     postlude helpers or blocked library calls whose `f.line` fell outside the
+     calling stage — including `examples/python-build`,
+     `examples/shared-library/success`, `examples/shared-library/failure`,
+     `tests/baselines/d2/*.workflow.yml`, and
+     `tests/goldens/pure-declarative/*.workflow.yml` — produce byte-for-byte
+     identical `workflow.yml` output.
+   - **Permitted attribution fix in blocked shared-library workflows**: Where
+     an existing blocked shared-library workflow had a finding inside
+     `vars/*.groovy` with `call_chain` whose `f.line` did not fall within the
+     calling stage's Jenkinsfile line range, updating the calling stage's
+     `# unsupported constructs (<codes>)` comment and `[NOT MIGRATED] <Stage>`
+     placeholder to show that blocker code (instead of `"see report"` or
+     misattributing it to another stage) is explicitly permitted and covered by
+     targeted before/after tests. Execution graph, `if: false` disabled state,
+     surviving steps of other stages, translation eligibility, and exit codes
+     must remain unchanged.
+   - **Unreached postlude fixtures unchanged**: Existing fixtures with
+     unreached postlude helpers or executable postlude statements
+     (`postlude-functions`, `java-maven-jetty-like`,
      `container-k8s-memphis-like`, `node-release-tutanota-like`) retain their
      `PB-GROOVY-POSTLUDE` findings and disabled skeleton drafts.
 
@@ -406,17 +498,25 @@ All fixtures live under
      Jenkinsfile postlude scanning use the exact same `def <name>(<params>) { <body> }`
      parser and `Definition` dataclass.
    - Export `POSTLUDE_SHADOWED_STEPS = BUILTIN_STEPS | {"script"}`.
-2. **`src/pipebridge/librarybody.py` — support optional Jenkinsfile `local_var` in `Resolver`**:
-   - Add `local_var: LibraryVar | None = None` to `Resolver.__init__`.
+2. **`src/pipebridge/librarybody.py` — support optional Jenkinsfile `local_var` and visited-helper tracking in `Resolver`**:
+   - Add `local_var: LibraryVar | None = None` to `Resolver.__init__` and
+     `visited_local_helpers: set[str] = field(default_factory=set)` to
+     `Resolution`.
    - Add `Resolver.resolve_local(helper_name: str, args: list[str], caller=None) -> Resolution`,
-     which looks up `helper_name` in `self.local_var.definitions`, checks
-     arity, and calls the existing `self._expand(self.local_var, defn, args, [], (root_frame,), res, lib_name=None)`.
+     which records `helper_name` in `res.visited_local_helpers` upon entry,
+     looks up `helper_name` in `self.local_var.definitions`, checks arity, and
+     calls the existing
+     `self._expand(self.local_var, defn, args, [], (root_frame,), res, lib_name=None)`.
+     When `res.blocked` is true, `res.operations` is cleared as today while
+     `res.visited_local_helpers` is preserved.
    - In `_do_invocation`, when `lib_name is None` (expanding inside
      `self.local_var`), resolve `<callee>` against `self.local_var.definitions`
-     first and then `self._candidates(name_tok.value)` (collisions between the
-     two are already blocked before expansion). When `lib_name is not None`
-     (expanding inside a shared library `vars/*.groovy` file), keep current
-     behavior (resolve only against `var.definitions` and `self._candidates`).
+     first (recording `<callee>` in `res.visited_local_helpers` immediately
+     when matched, before arity/cycle/body checks) and then
+     `self._candidates(name_tok.value)` (collisions between the two are already
+     blocked before expansion). When `lib_name is not None` (expanding inside a
+     shared library `vars/*.groovy` file), keep current behavior (resolve only
+     against `var.definitions` and `self._candidates`).
 3. **`src/pipebridge/parser.py` — pre-scan postlude definitions and track reachability**:
    - After `_scan_prelude()` locates the top-level `pipeline` token, locate the
      matching closing `}` of `pipeline { ... }` by balanced-brace lookahead.
@@ -434,20 +534,31 @@ All fixtures live under
      - Pass the resulting `local_var = LibraryVar(name="_jenkinsfile", path=Path(self.source_path or "Jenkinsfile"), definitions=...)`
        into `LibraryBodyResolver`.
    - In `_parse_steps()`, dispatch `<name>` to `_parse_library_call()` when
-     `<name>` is a postlude helper name (marking `<name>` reached) or when
-     `self._resolved_libraries` is non-empty.
+     `<name>` is a postlude helper name (recording `<name>` in
+     `self._reached_postlude_helpers` immediately, and merging
+     `res.visited_local_helpers` into `self._reached_postlude_helpers` even
+     when the call or stage is blocked) or when `self._resolved_libraries` is
+     non-empty. Diagnostic traversal (`_diagnose_steps_remainder`,
+     `_diagnose_wrapper_body`, etc.) never updates
+     `self._reached_postlude_helpers`.
    - In `_parse_library_call()`, when `op.library is None`, set
      `rel_script = f"scripts/_jenkinsfile/{op.func_name}-{op.step_index}.sh"`.
    - After `_parse_pipeline()`, emit `PB-GROOVY-POSTLUDE` for every postlude
      helper definition not in `self._reached_postlude_helpers` as well as any
      non-helper postlude statements.
 4. **`src/pipebridge/workflow.py` — stage blocker attribution via root `call_chain` frame**:
-   - In `_stage_blocker_codes`, check the root frame line in `f.call_chain`
-     (when present) against `[stage.span.line, next_stage.span.line)` so
-     findings located in a postlude helper or `vars/*.groovy` file appear on
-     the calling stage's `[NOT MIGRATED]` placeholder.
+   - In `_stage_blocker_codes`, when `f.call_chain` is non-empty, parse the
+     root call-site line from `f.call_chain[0]` and check
+     `stage.span.line <= call_line < upper` (using `stage.span.line <= f.line < upper`
+     only when `f.call_chain` is empty) so findings located in a postlude
+     helper or `vars/*.groovy` file are attributed to the calling stage's
+     `[NOT MIGRATED]` placeholder without misattributing callee line numbers.
 5. **`tests/` — unit, integration, and CLI execution tests**:
    - Add tests covering the success fixture, all negative fixtures, script
      reuse, runtime failure propagation, expression neutralization, credential
      scoping + stage clearing, single-job stash/unstash from postlude helpers,
-     and byte-for-byte preservation of existing outputs.
+     failing reached helpers and cleared stages (asserting no spurious
+     `PB-GROOVY-POSTLUDE` for direct or transitive visited helpers), targeted
+     before/after stage-blocker attribution tests for blocked shared-library
+     and postlude-helper stages, and byte-for-byte preservation of unaffected
+     outputs.
