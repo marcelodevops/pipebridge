@@ -83,6 +83,7 @@ class Resolution:
     operations: list[Operation] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     credentials: list[LibraryCredential] = field(default_factory=list)
+    visited_local_helpers: set[str] = field(default_factory=set)
     blocked: bool = False
     pending: bool = False
 
@@ -115,13 +116,23 @@ def _frame(caller_path: Path | None, line: int, col: int, name: str) -> str:
 
 
 class Resolver:
-    def __init__(self, library_map: LibraryMap, discovered: list[DiscoveredVar] | None = None):
-        self.map = library_map
-        self.discovered = discovered if discovered is not None else discover_vars(library_map)[0]
+    def __init__(
+        self,
+        library_map: LibraryMap | None = None,
+        discovered: list[DiscoveredVar] | None = None,
+        local_var: LibraryVar | None = None,
+    ):
+        self.map = library_map if library_map is not None else LibraryMap(entries={})
+        self.discovered = (
+            discovered
+            if discovered is not None
+            else (discover_vars(self.map)[0] if library_map is not None else [])
+        )
         self.by_name: dict[str, list[DiscoveredVar]] = {}
         for d in self.discovered:
             self.by_name.setdefault(d.name, []).append(d)
         self.vars: dict[Path, LibraryVar] = {}
+        self.local_var = local_var
 
     def _candidates(self, name: str) -> list[DiscoveredVar]:
         return self.by_name.get(name, [])
@@ -172,6 +183,55 @@ class Resolver:
             res.operations = []
         return res
 
+    def resolve_local(self, helper_name: str, args: list[str], caller=None) -> Resolution:
+        """Resolve a Jenkinsfile postlude helper call."""
+        root_frame = _frame(*(caller if caller is not None else (None, 1, 1, helper_name)))
+        res = Resolution(visited_local_helpers={helper_name})
+        if self.local_var is None:
+            res.blocked = True
+            res.findings.append(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Postlude helper '{helper_name}' has no definition.",
+                    1,
+                    1,
+                    chain=(root_frame,),
+                )
+            )
+            return res
+        defn = next((d for d in self.local_var.definitions if d.name == helper_name), None)
+        if defn is None:
+            res.blocked = True
+            res.findings.append(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Postlude helper '{helper_name}' has no definition.",
+                    1,
+                    1,
+                    path=self.local_var.path,
+                    chain=(root_frame,),
+                )
+            )
+            return res
+        if len(args) != len(defn.params):
+            res.blocked = True
+            res.operations = []
+            res.findings.append(
+                _finding(
+                    PB_LIB_CALL,
+                    f"Library call '{helper_name}' passed {len(args)} argument(s); {helper_name}() requires {len(defn.params)}.",
+                    defn.span.line,
+                    defn.span.col,
+                    path=self.local_var.path,
+                    chain=(root_frame, _label(self.local_var.path, defn)),
+                )
+            )
+            return res
+        self._expand(self.local_var, defn, args, [], (root_frame,), res, lib_name=None)
+        if res.blocked:
+            res.operations = []
+        return res
+
     def _merge_findings(self, var: LibraryVar, res: Resolution, frames=()) -> None:
         for f in var.findings:
             merged = replace(f, call_chain=frames) if f.call_chain != frames else f
@@ -180,6 +240,8 @@ class Resolver:
                 res.blocked = True
 
     def _expand(self, var, defn, arg_values, stack, frames, res, lib_name: str | None = None, cred_refs: tuple[int, ...] = ()):
+        if lib_name is None:
+            res.visited_local_helpers.add(defn.name)
         if len(stack) >= LIBRARY_CALL_DEPTH_CAP:
             res.blocked = True
             res.findings.append(_finding(PB_LIB_CALL, f"Library call depth exceeded {LIBRARY_CALL_DEPTH_CAP} at '{defn.name}'.", defn.span.line, defn.span.col, path=var.path, chain=frames))
@@ -517,6 +579,8 @@ class Resolver:
         return step_counter
 
     def _do_invocation(self, name_tok, stmt, var, defn, params, stack, res, chain, lib_name: str | None = None, cred_refs: tuple[int, ...] = ()):
+        if lib_name is None and any(d.name == name_tok.value for d in var.definitions):
+            res.visited_local_helpers.add(name_tok.value)
         chain = chain + (_frame(var.path, name_tok.line, name_tok.col, name_tok.value),)
         args = []
         idx = 2

@@ -213,10 +213,35 @@ def _placeholder_step(name: str, codes: str) -> list[str]:
     ]
 
 
+def _blocker_stage_line(finding) -> int:
+    """Line in the Jenkinsfile where a blocker applies to a stage.
+
+    When a finding carries a call_chain, its root frame
+    ``<path>:<name>@<line>:<col>`` identifies the Jenkinsfile stage call site;
+    using that line prevents a vars/*.groovy line number or a postlude helper
+    line number from missing the calling stage or colliding with another stage.
+    """
+    chain = getattr(finding, "call_chain", ()) or ()
+    if chain:
+        root = chain[0]
+        at_idx = root.rfind("@")
+        if at_idx != -1:
+            line_str = root[at_idx + 1 :].split(":", 1)[0]
+            if line_str.isdigit():
+                return int(line_str)
+    return finding.line
+
+
 def _stage_blocker_codes(blockers, stage: Stage, next_stage: Stage | None) -> list[str]:
-    """Codes of blockers whose source position falls inside this stage."""
+    """Codes of blockers whose Jenkinsfile position (or root call site) falls inside this stage."""
     upper = next_stage.span.line if next_stage is not None else float("inf")
-    return sorted({f.code for f in blockers if stage.span.line <= f.line < upper})
+    return sorted(
+        {
+            f.code
+            for f in blockers
+            if stage.span.line <= _blocker_stage_line(f) < upper
+        }
+    )
 
 
 def _checkout_step_lines(name: str) -> list[str]:

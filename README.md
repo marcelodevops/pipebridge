@@ -72,7 +72,7 @@ Produces:
 | `workflow.yml` | The generated GitHub Actions workflow (disabled with `if: false` when blockers exist) |
 | `migration-report.md` | Human-readable migration report |
 | `migration-report.json` | The same report as structured JSON with stable finding codes |
-| `scripts/` | Emitted only when shared-library steps or `stash`/`unstash` are lowered; must be committed alongside `workflow.yml` |
+| `scripts/` | Emitted only when shared-library steps, Jenkinsfile postlude helpers, or `stash`/`unstash` are lowered; must be committed alongside `workflow.yml` |
 
 pipebridge **never overwrites existing outputs by default**. Add `--force` to replace previously generated files.
 
@@ -96,7 +96,7 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 
 | Jenkins construct | Status | Notes |
 | --- | --- | --- |
-| One declarative `pipeline { }` block | ✅ Supported | Surrounding Groovy is recognized and classified without evaluation (see rows below): mapped `@Library('name') _` / `@Library('name@rev') _` declarations are resolved statically via `--library-map` and ordinary `import` statements are info-level (`PB-GROOVY-IMPORT`), while executable surrounding Groovy is blocked and never translated; genuinely scripted pipelines are still rejected with `PB-SCRIPT` |
+| One declarative `pipeline { }` block | ✅ Supported | Surrounding Groovy is recognized and classified without evaluation (see rows below): mapped `@Library('name') _` / `@Library('name@rev') _` declarations (via `--library-map`) and reached top-level postlude `def <helper>(...) { ... }` definitions in the supported subset are resolved statically, and ordinary `import` statements are info-level (`PB-GROOVY-IMPORT`), while unreached postlude helpers and executable surrounding Groovy are blocked and never translated; genuinely scripted pipelines are still rejected with `PB-SCRIPT` |
 | `agent any` | ⚠️ With assumption | Target runner assumed `ubuntu-latest`; Jenkins `agent any` does **not** establish OS, installed tools, or network access (`PB-ASSUME-RUNNER`) |
 | Pipeline-level `agent { label '<literal>' }` | ⚠️ With assumption | Mapped to `runs-on: [self-hosted, <label>]` (`PB-ASSUME-RUNNER-LABEL`). This selects a runner label; it does **not** claim the same machine, OS, tools, network, or permissions. Expressions, variables, `self-hosted` in any casing, and every other label shape stay blocked |
 | `agent none`, stage-level agents, `node`, `docker`, `dockerfile`, `kubernetes`, label expressions | ❌ Blocked | `PB-AGENT` |
@@ -109,7 +109,7 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 | `environment` at stage level | ✅ Supported | Mapped to step-level `env` on that stage's steps only — scope is preserved |
 | Single-quoted Groovy strings `'…'` | ✅ Supported | Literal; only `\'` and `\\` are escapes |
 | Double-quoted Groovy strings `"…"` without interpolation | ✅ Supported | Standard Groovy escapes processed |
-| Groovy interpolation `"… ${expr} …"`, `"… $var …"` | ❌ Blocked (except bare library parameters) | `PB-INTERP` — dynamic expressions are blocked, except bare in-scope parameter references (`$param`, `${param}`) in mapped shared-library `vars/*.groovy` `sh`/`echo` strings, which are lowered to positional script parameters (`${1}`, `${2}`, …) passed via `argv` |
+| Groovy interpolation `"… ${expr} …"`, `"… $var …"` | ❌ Blocked (except bare library/helper parameters) | `PB-INTERP` — dynamic expressions are blocked, except bare in-scope parameter references (`$param`, `${param}`) in mapped shared-library `vars/*.groovy` and reached Jenkinsfile postlude-helper `sh`/`echo` strings, which are lowered to positional script parameters (`${1}`, `${2}`, …) passed via `argv` |
 | Triple-quoted strings `'''…'''`, `"""…"""` | ✅ Supported | Same rules as their single/double counterparts; newlines preserved |
 | `script { }` blocks and scripted pipelines | ❌ Blocked | `PB-SCRIPT` |
 | Shared libraries (`@Library('name') _`, `@Library('name@rev') _`) with `--library-map` | ⚠️ With assumption | Resolves only explicitly declared, locally mapped libraries (`PB-ASSUME-LIBRARY`); never fetches repositories or executes Groovy. Supports `vars/*.groovy` `def call` / local helpers, `sh`, `echo`, literal/forwarded parameters, bounded `withCredentials`, and single-job `stash`/`unstash`. Without `--library-map`, or for unmapped/ineligible forms, keeps `PB-LIB`. See [`docs/shared-library-migration-design.md`](docs/shared-library-migration-design.md) |
@@ -123,11 +123,12 @@ Malformed input and valid-but-unsupported input are deliberately distinguished: 
 | Groovy `import` before the block: `import [static] a.b.Class`, optionally ending `.*` | ⚠️ Recognized, info-level | `PB-GROOVY-IMPORT` — imports execute nothing and are never evaluated; references to imported symbols inside steps stay blocked. `as` aliasing or any other form is blocked (`PB-GROOVY-PRELUDE`) |
 | Variable declarations before the block (`def x`, `String x = …`, any initializer) | ❌ Blocked | `PB-GROOVY-PRELUDE` — executable Groovy, never evaluated, never judged harmless (even an unused variable can have a side-effecting initializer); the declarative block is still extracted and listed |
 | Annotations before the block other than `@Library` | ❌ Blocked | `PB-GROOVY-PRELUDE` — eligible `@Library('name') _` / `@Library('name@rev') _` declarations mapped via `--library-map` are resolved statically (`PB-ASSUME-LIBRARY`), while unmapped or ineligible `@Library` forms keep `PB-LIB` |
-| Helper function definitions or other statements after the block | ❌ Blocked | `PB-GROOVY-POSTLUDE` — executable Groovy, skipped without evaluation; the declarative block is still extracted and listed, and calls to the helpers from steps stay blocked |
+| Top-level postlude `def <helper>(...) { ... }` after the block | ⚠️ Bounded subset | Reached top-level `def <helper>([String] param, ...) { ... }` definitions using only supported `sh`, `echo`, literal/forwarded parameters, bounded `withCredentials`, and single-job `stash`/`unstash` lower to `<output>/scripts/_jenkinsfile/<function>-<n>.sh`. Unreached postlude helpers and any other postlude statements remain `PB-GROOVY-POSTLUDE`; collisions, recursion, depth > 20, or unsupported body statements emit `PB-LIB-CALL`. See [`docs/jenkinsfile-helper-translation-design.md`](docs/jenkinsfile-helper-translation-design.md) |
+| Other statements or unreached functions after the block | ❌ Blocked | `PB-GROOVY-POSTLUDE` — executable Groovy, skipped without evaluation; the declarative block is still extracted and listed |
 
 Unsupported blocks are **not traversed**: a `script { }` body, or a `withCredentials` form that is not the accepted literal `string` binding, is never mined for `sh`/`echo` commands as though its enclosing behavior didn't exist. An accepted `string` header is scanned only for supported top-level steps; an unknown or nested body stops that scan and is not mined.
 
-Groovy **surrounding** the pipeline block is never evaluated: only its statement boundaries are recognized (enough to classify it precisely and still parse the pipeline block). Supported `@Library('name') _` / `@Library('name@rev') _` declarations mapped via `--library-map` are resolved statically against local `vars/*.groovy` files (`PB-ASSUME-LIBRARY`), and recognized `import` statements are recorded as info-level findings (`PB-GROOVY-IMPORT`). All executable surrounding Groovy (variable declarations, annotations other than `@Library`, unsupported import forms, and postlude helper functions or statements) is never translated and remains a pipeline-level blocker (`PB-GROOVY-PRELUDE` / `PB-GROOVY-POSTLUDE`), so the generated draft remains a disabled skeleton that lists the extracted stages; a draft never appears fully migrated while executable surrounding Groovy is unmodeled.
+Groovy **surrounding** the pipeline block is never evaluated: only its statement boundaries are recognized (enough to classify it precisely and still parse the pipeline block). Supported `@Library('name') _` / `@Library('name@rev') _` declarations mapped via `--library-map` are resolved statically against local `vars/*.groovy` files (`PB-ASSUME-LIBRARY`), reached top-level postlude `def <helper>(...) { ... }` definitions in the bounded grammar are lowered via the same static resolver, and recognized `import` statements are recorded as info-level findings (`PB-GROOVY-IMPORT`). All other surrounding Groovy (prelude variable declarations, prelude functions, annotations other than `@Library`, unsupported import forms, unreached postlude helpers, and other postlude statements) is never translated and remains a pipeline-level blocker (`PB-GROOVY-PRELUDE` / `PB-GROOVY-POSTLUDE`), so the generated draft remains a disabled skeleton that lists the extracted stages; a draft never appears fully migrated while executable surrounding Groovy is unmodeled.
 
 ## Generated workflow behavior
 
@@ -174,7 +175,7 @@ Every report contains:
 | --- | --- | --- |
 | `PB-SCRIPT` | blocker | Scripted pipeline syntax or `script { }` block |
 | `PB-LIB` | blocker | Unsupported or unmapped shared library usage (`@Library` without a matching map entry, ineligible `@Library` form, or pipeline `library` section) |
-| `PB-LIB-CALL` | blocker | Shared-library call or definition error (missing var/`call()`, ambiguity, built-in shadowing, duplicate declaration, recursion/depth cap, bad arguments, unsupported library statement, or invalid `stash`/`unstash`) |
+| `PB-LIB-CALL` | blocker | Shared-library or postlude-helper call/definition error (missing var/`call()`, ambiguity, built-in or library-var collision, duplicate declaration, recursion/depth cap, bad arguments, unsupported body statement, or invalid `stash`/`unstash`) |
 | `PB-LIB-MAP-UNUSED` | info | `--library-map` entry not declared by any resolved `@Library` annotation |
 | `PB-ASSUME-LIBRARY` | info | Local directory used as a shared library without running Jenkins resolution or fetching/checking `@rev` |
 | `PB-CRED` | blocker | Credentials / credential bindings |
@@ -191,7 +192,7 @@ Every report contains:
 | `PB-TRIGGER` | blocker | `triggers` |
 | `PB-INPUT` | blocker | `input` approval gates |
 | `PB-POST` | blocker | `post` actions |
-| `PB-INTERP` | blocker | Groovy interpolation / dynamic expression in a string (outside bare in-scope parameters in mapped shared-library `sh`/`echo` strings) |
+| `PB-INTERP` | blocker | Groovy interpolation / dynamic expression in a string (outside bare in-scope parameters in mapped shared-library and postlude-helper `sh`/`echo` strings) |
 | `PB-ENVVAL` | blocker | Non-literal `environment` value |
 | `PB-SYNTAX` | blocker | Unknown or unsupported syntax |
 | `PB-JENV` | warning | Jenkins-specific variable reference in shell text |
@@ -204,7 +205,7 @@ Every report contains:
 | `PB-TRIGGER-MANUAL` | info | Workflow triggers `workflow_dispatch` only |
 | `PB-GROOVY-IMPORT` | info | Ordinary Groovy import statement before the pipeline block (limited grammar; never evaluated) |
 | `PB-GROOVY-PRELUDE` | blocker | Executable Groovy before the pipeline block (declarations, annotations other than `@Library`, unsupported import forms) |
-| `PB-GROOVY-POSTLUDE` | blocker | Executable Groovy after the pipeline block (helper functions, other statements) |
+| `PB-GROOVY-POSTLUDE` | blocker | Executable Groovy after the pipeline block (unreached postlude helper functions, non-`def` functions, or other statements) |
 | `PB-SINGLE-JOB` | info | All stages kept in one job to preserve workspace state |
 
 ## Literal string credential binding
@@ -262,7 +263,7 @@ pipebridge convert Jenkinsfile --output ./migration --force \
 
 When the pipeline is otherwise clean, that exits **0** and enables the job. An unsupported credential form stays `PB-CRED` either way.
 
-## Shared libraries and single-job stash
+## Shared libraries, postlude helpers, and single-job stash
 
 To resolve `@Library('name') _` or `@Library('name@rev') _` declarations against local checkouts (without fetching repositories or executing Groovy), supply `--library-map`:
 
@@ -293,12 +294,19 @@ pipebridge convert examples/shared-library/success/Jenkinsfile \
   --output examples/shared-library/success/migration
 ```
 
-When library scripts or `stash`/`unstash` helpers are emitted:
+Top-level `def <helper>([String] param, ...) { ... }` functions defined in the Jenkinsfile postlude (after `pipeline { ... }`) are resolved statically with the same grammar and require no `--library-map`:
+
+```sh
+pipebridge convert examples/jenkinsfile-helpers/success/Jenkinsfile \
+  --output examples/jenkinsfile-helpers/success/migration
+```
+
+When library scripts, postlude-helper scripts, or `stash`/`unstash` helpers are emitted:
 
 - `--output` must be a relative path under the working directory with no `..` segments.
-- Generated files are placed under `<output>/scripts/<library>/<var>/<function>-<n>.sh`, `<output>/scripts/pipebridge_stash.py`, and `<output>/scripts/pipebridge_unstash.py`.
+- Generated files are placed under `<output>/scripts/<library>/<var>/<function>-<n>.sh`, `<output>/scripts/_jenkinsfile/<function>-<n>.sh`, `<output>/scripts/pipebridge_stash.py`, and `<output>/scripts/pipebridge_unstash.py`.
 - **Commit the entire `<output>/scripts/` tree alongside `workflow.yml`**, and do not set `defaults.run.working-directory`: the generated workflow invokes those relative script paths from `$GITHUB_WORKSPACE` after checkout.
-- Literal parameter values are passed as shell `argv` (never spliced into `.sh` files). `sh(param)` runs `bash --noprofile --norc -eo pipefail -c "${1}"`.
+- Literal parameter values are passed as shell `argv` (never spliced into `.sh` files), and repeated calls to the same helper reuse the same generated `.sh` file. `sh(param)` runs `bash --noprofile --norc -eo pipefail -c "${1}"`.
 - Single-job `stash` / `unstash` stores files under `$RUNNER_TEMP/pipebridge-stash/<name>` and requires `python3` and `bash` on the runner.
 
 ## Example migration
@@ -460,11 +468,11 @@ in the same pass (`PB-INTERP`) rather than hidden behind `PB-INPUT`.
 ## Known limitations
 
 - The supported subset is deliberately small; anything outside it is reported, never approximated.
-- Surrounding Groovy is recognized only within a deliberately limited grammar (ordinary imports, annotations, variable declarations, function definitions) and is **never evaluated**. Supported `@Library('name') _` / `@Library('name@rev') _` prelude declarations mapped via `--library-map` are resolved statically and ordinary imports are recorded as `PB-GROOVY-IMPORT`, whereas executable surrounding Groovy (variable declarations, annotations other than `@Library`, unsupported imports, and postlude functions/statements) is never translated and blocks the pipeline (`PB-GROOVY-PRELUDE` / `PB-GROOVY-POSTLUDE`). This is not complete Groovy parsing: an unrecognized statement before the block still classifies the whole file as `PB-SCRIPT`, and multiple or ambiguous `pipeline` occurrences are rejected rather than resolved.
-- Findings inside a blocked scope are diagnostics, not translated behavior. pipebridge reports the triggering construct and the declarative siblings it can see, but it does not emit steps or nested stages from that scope, and the draft stays disabled. Opaque bodies (`script`, shared libraries, agent internals, `when` expressions, `post`, unsupported `withCredentials`, and unknown closures) are boundaries, not traversed code; traversal also stops at nesting depth 20 and reports the truncation. A `withCredentials` seen only through that diagnostic walk is recorded as unsupported and is not translated. See [`docs/d2-nested-diagnostics-design.md`](docs/d2-nested-diagnostics-design.md).
+- Surrounding Groovy is recognized only within a deliberately limited grammar (ordinary imports, annotations, variable declarations, function definitions) and is **never evaluated**. Supported `@Library('name') _` / `@Library('name@rev') _` prelude declarations mapped via `--library-map` and reached top-level postlude `def <helper>(...) { ... }` definitions in the supported subset are resolved statically, and ordinary imports are recorded as `PB-GROOVY-IMPORT`, whereas executable surrounding Groovy (variable declarations, prelude functions, annotations other than `@Library`, unsupported imports, unreached postlude helpers, and other postlude statements) is never translated and blocks the pipeline (`PB-GROOVY-PRELUDE` / `PB-GROOVY-POSTLUDE`). This is not complete Groovy parsing: an unrecognized statement before the block still classifies the whole file as `PB-SCRIPT`, and multiple or ambiguous `pipeline` occurrences are rejected rather than resolved.
+- Findings inside a blocked scope are diagnostics, not translated behavior. pipebridge reports the triggering construct and the declarative siblings it can see, but it does not emit steps or nested stages from that scope, and the draft stays disabled. Opaque bodies (`script`, shared libraries, postlude helpers, agent internals, `when` expressions, `post`, unsupported `withCredentials`, and unknown closures) are boundaries, not traversed code; traversal also stops at nesting depth 20 and reports the truncation. A `withCredentials` seen only through that diagnostic walk is recorded as unsupported and is not translated. See [`docs/d2-nested-diagnostics-design.md`](docs/d2-nested-diagnostics-design.md).
 - No Jenkins runtime equivalence is claimed or tested: values computed by surrounding Groovy at Jenkins runtime are not carried into any generated workflow.
 - One workflow, one job, `workflow_dispatch` only. No push/PR triggers in the MVP.
-- Groovy is supported only as far as literal string forms (plus bare in-scope parameter references `$param` / `${param}` in mapped shared-library `vars/*.groovy` `sh`/`echo` strings, which are lowered to positional script parameters passed via `argv`); any other Groovy interpolation or dynamic expression is a blocker (`PB-INTERP`).
+- Groovy is supported only as far as literal string forms (plus bare in-scope parameter references `$param` / `${param}` in mapped shared-library `vars/*.groovy` and reached Jenkinsfile postlude-helper `sh`/`echo` strings, which are lowered to positional script parameters passed via `argv`); any other Groovy interpolation or dynamic expression is a blocker (`PB-INTERP`).
 - Parameters, triggers, conditions, approvals, and post actions are never migrated — they require human decisions. Credential bindings are migrated only in the bounded literal `string` form below; every other credential form stays blocked.
 - `echo` becomes `printf '%s\n'` to preserve semantics; output is identical but the command differs.
 - The runner assumption (`ubuntu-latest`) is just that — an assumption. Jenkins `agent any` guarantees nothing about OS, tools, or network.
